@@ -1,0 +1,12 @@
+# 학습된 모델 가중치 — GitHub 100MB 제한 초과, outputs_ast.zip에서 복원할 것
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# 파이썬
+__pycache__/
+*.pyc
+
+# Claude Code 임시 파일
+.claude/*.tmp.*

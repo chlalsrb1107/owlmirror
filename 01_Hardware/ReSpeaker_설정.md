@@ -1,17 +1,19 @@
-# ReSpeaker Mic Array v3.0 설정
+# ReSpeaker Mic Array v2.0 설정
+
+> ⚠️ **2026-07-05 정정**: 이 문서는 원래 v3.0(XVF-3800) 기준으로 작성되었으나, 실측 결과 확정 하드웨어는 **ReSpeaker 4 Mic Array v2.0 (UAC1.0)** 이다. 아래 "하드웨어 DoA 읽기" 절의 XVF-3800/HID 코드는 v3.0 전용이라 v2.0에는 그대로 적용 불가 — 별도 재작성 필요 (Seeed 공식 `tuning.py`, VID:PID `2886:0018` 기준).
 
 ## 하드웨어 사양
 
 | 항목 | 사양 |
 |---|---|
-| 모델 | ReSpeaker Mic Array v3.0 |
-| DSP 칩 | XMOS XVF-3800 |
+| 모델 | ReSpeaker 4 Mic Array v2.0 |
+| USB ID | `2886:0018` (UAC1.0) |
 | 마이크 수 | 4개 (원형 배치) |
-| 인터페이스 | USB-C (USB Audio Class 2.0) |
-| 샘플링 레이트 | 최대 48kHz |
-| 채널 | 4ch 원시 + 1ch 처리 후 출력 |
-| 내장 알고리즘 | AEC, NS, AGC, 빔포밍, DoA |
-| DoA 출력 방식 | USB HID 인터페이스 |
+| 인터페이스 | USB 2.0 (USB Audio Class 1.0) |
+| 샘플링 레이트 | 16kHz 고정 |
+| 채널 | **실측 6ch** — ch0: AEC 처리된 단일 채널, ch1~4: raw mic 1~4, ch5: playback reference |
+| 내장 알고리즘 | AEC, NS, AGC, 빔포밍, DoA (온보드 DSP) |
+| DoA 출력 방식 | USB HID (v3.0과 프로토콜 다름, 별도 확인 필요) |
 | 동작 전압 | 5V USB |
 
 ---
@@ -19,16 +21,19 @@
 ## Jetson Orin Nano Super 연결
 
 ```bash
-# USB-C 연결 후 장치 확인
+# 장치 확인
 lsusb | grep -i seeed
-# → Bus 001 Device 003: ID 2886:0019 SEEED Technology Inc. ReSpeaker Mic Array v3.0
+# → Bus 001 Device 006: ID 2886:0018 Seeed Technology Co., Ltd. ReSpeaker 4 Mic Array (UAC1.0)
 
 # ALSA 장치 확인
 arecord -l
-# hw:1,0 에 ReSpeaker가 잡혀야 함
+# "ArrayUAC10" 카드로 잡힘 (카드 번호는 시스템마다 다를 수 있음, 예: 카드 2)
 
-# 4채널 녹음 테스트 (16kHz, 16bit)
-arecord -D hw:1,0 -r 16000 -c 4 -f S16_LE -d 5 test.wav
+# 6채널 녹음 테스트 (16kHz, 16bit) — 4ch가 아니라 6ch임에 주의
+arecord -D hw:2,0 -r 16000 -c 6 -f S16_LE -d 5 test.wav
+
+# Python(PyAudio)에서 장치 자동탐색 + 6ch 캡처 예시:
+# 03_Audio_Classification/code/realtime_classify.py 참고 (MIC_CHANNEL_INDEX=0 이 처리된 채널)
 ```
 
 ---

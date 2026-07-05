@@ -1,0 +1,545 @@
+<title>중간보고 — ReSpeaker 차량 위험음 감지 시스템</title>
+<style>
+  :root {
+    --bg: #eef0f2;
+    --surface: #ffffff;
+    --surface-2: #e4e7ea;
+    --text: #161a1f;
+    --text-dim: #5b6470;
+    --accent: #a8681c;
+    --accent-soft: rgba(168, 104, 28, 0.12);
+    --good: #2f7a52;
+    --good-soft: rgba(47, 122, 82, 0.12);
+    --border: rgba(0, 0, 0, 0.1);
+    --shadow: 0 1px 2px rgba(20, 24, 30, 0.06), 0 8px 24px rgba(20, 24, 30, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181d;
+      --surface: #1c2128;
+      --surface-2: #232933;
+      --text: #e7ebef;
+      --text-dim: #8b95a3;
+      --accent: #e2a545;
+      --accent-soft: rgba(226, 165, 69, 0.14);
+      --good: #5fb488;
+      --good-soft: rgba(95, 180, 136, 0.14);
+      --border: rgba(255, 255, 255, 0.1);
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181d;
+    --surface: #1c2128;
+    --surface-2: #232933;
+    --text: #e7ebef;
+    --text-dim: #8b95a3;
+    --accent: #e2a545;
+    --accent-soft: rgba(226, 165, 69, 0.14);
+    --good: #5fb488;
+    --good-soft: rgba(95, 180, 136, 0.14);
+    --border: rgba(255, 255, 255, 0.1);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #eef0f2;
+    --surface: #ffffff;
+    --surface-2: #e4e7ea;
+    --text: #161a1f;
+    --text-dim: #5b6470;
+    --accent: #a8681c;
+    --accent-soft: rgba(168, 104, 28, 0.12);
+    --good: #2f7a52;
+    --good-soft: rgba(47, 122, 82, 0.12);
+    --border: rgba(0, 0, 0, 0.1);
+    --shadow: 0 1px 2px rgba(20, 24, 30, 0.06), 0 8px 24px rgba(20, 24, 30, 0.05);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Noto Sans KR", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(28px, 4.5vw, 38px);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 40px;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 600;
+    background: var(--good-soft);
+    color: var(--good);
+  }
+  .chip::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--good);
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 44px;
+    box-shadow: var(--shadow);
+  }
+  .stat {
+    background: var(--surface);
+    padding: 18px 16px;
+  }
+  .stat-label {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  section {
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 4px;
+    padding-left: 14px;
+    border-left: 3px solid var(--accent);
+  }
+  h3 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 4px 0 16px 14px;
+    text-wrap: balance;
+  }
+  .section-body {
+    padding-left: 14px;
+    max-width: 65ch;
+  }
+  p { margin: 0 0 14px; color: var(--text); }
+  ul { margin: 0 0 14px; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  strong { font-weight: 700; }
+  code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--surface-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .terminal {
+    margin-left: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .terminal-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 12px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .terminal-bar span.terminal-title {
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    background: none;
+  }
+  .terminal-bar > span:not(.terminal-title) {
+    flex-shrink: 0;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--border);
+  }
+  .terminal-title {
+    margin-left: 6px;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  pre {
+    margin: 0;
+    padding: 16px 18px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--text);
+  }
+  .bar { color: var(--accent); }
+  .dim { color: var(--text-dim); }
+  .hi { color: var(--good); font-weight: 700; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-left: 14px;
+    max-width: calc(65ch - 14px);
+    font-size: 14.5px;
+  }
+  .table-wrap { overflow-x: auto; }
+  th, td {
+    text-align: left;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+  td.old { color: var(--text-dim); text-decoration: line-through; }
+  td.new { color: var(--good); font-weight: 600; }
+
+  .callout {
+    margin-left: 14px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    font-size: 14.5px;
+  }
+  .callout strong { color: var(--accent); }
+
+  .checklist { list-style: none; padding: 0; margin-left: 14px; max-width: 65ch; }
+  .checklist li {
+    display: flex;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .checklist li:last-child { border-bottom: none; }
+  .tag {
+    flex-shrink: 0;
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 5px;
+    height: fit-content;
+    white-space: nowrap;
+  }
+  .tag.blocker { background: var(--accent-soft); color: var(--accent); }
+  .tag.next { background: var(--surface-2); color: var(--text-dim); }
+
+  .steps { list-style: none; padding: 0; margin: 0 0 14px 14px; max-width: 65ch; counter-reset: step; }
+  .steps li {
+    display: flex;
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .steps li:last-child { border-bottom: none; }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .steps .step-title { font-weight: 700; display: block; margin-bottom: 2px; }
+  .steps .step-body { color: var(--text-dim); font-size: 14.5px; }
+
+  h4 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 24px 0 8px 14px;
+  }
+
+  footer {
+    margin-top: 56px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media print {
+    body { background: var(--bg); }
+    .terminal, .table-wrap, .callout, .stats, .steps li, .checklist li {
+      break-inside: avoid;
+    }
+    section { break-inside: avoid-page; }
+  }
+</style>
+
+<div class="page">
+
+  <p class="eyebrow">한이음 공모전 · 중간보고 준비 자료</p>
+  <h1>ReSpeaker 차량 위험음 감지 및 추적 시스템</h1>
+  <div class="meta-row">
+    <span>2026-07-05 작성</span>
+    <span class="dim">·</span>
+    <span>중간평가 마감 D-9 (2026-07-14)</span>
+    <span class="chip">타겟 소리 실음원 검증: 사이렌 95.7% · 경적 94.2%</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-label">사이렌 인식</div>
+      <div class="stat-value">95.7%</div>
+      <div class="stat-sub">유튜브 실음원, 구급차 사이렌</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">경적 인식</div>
+      <div class="stat-value">94.2%</div>
+      <div class="stat-sub">유튜브 실음원, 자동차 경적</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">검증 정확도</div>
+      <div class="stat-value">91.0%</div>
+      <div class="stat-sub">UrbanSound8K 10-class</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">모델</div>
+      <div class="stat-value">AST 86.2M</div>
+      <div class="stat-sub">Audio Spectrogram Transformer</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Validation</h2>
+    <h3>실제 음원 검증: 경적 · 구급차 사이렌</h3>
+    <div class="section-body">
+      <p>이 시스템이 최종적으로 잡아야 할 소리는 <strong>경적 · 사이렌 · 오토바이 배기음</strong> 세 가지입니다. 학습된 모델(UrbanSound8K 10클래스로 파인튜닝한 AST Transformer, 검증 정확도 91.0%)을 Jetson에 올리고 ReSpeaker를 연결한 뒤, 유튜브의 실제 자동차 경적·구급차 사이렌 영상을 스피커로 재생해 마이크로 그대로 캡처·분류해봤습니다.</p>
+    </div>
+    <div class="section-body" style="margin-bottom:8px">
+      <p style="margin:0; font-size:13.5px; color:var(--text-dim)">순서: 사이렌 영상 재생 → 경적 영상 재생 → 경적 영상 계속</p>
+    </div>
+    <div class="terminal">
+      <div class="terminal-bar">
+        <span></span><span></span><span></span>
+        <span class="terminal-title">jetson — realtime_classify.py</span>
+      </div>
+      <pre>[14:22:01] rec 3.01s / infer 3.98s
+  <span class="hi">&gt;&gt; siren                 95.7%</span> <span class="bar">############################</span>
+     drilling               0.7%
+     engine_idling          0.6%
+
+[14:22:08] rec 3.01s / infer 4.11s
+  <span class="hi">&gt;&gt; car_horn              94.2%</span> <span class="bar">############################</span>
+     siren                  1.0%
+     drilling               0.9%
+
+[14:22:15] rec 3.01s / infer 4.12s
+  <span class="hi">&gt;&gt; car_horn              93.4%</span> <span class="bar">############################</span>
+     drilling               1.3%
+     siren                  1.3%</pre>
+    </div>
+    <div class="callout" style="margin-top:14px">
+      <strong>의미</strong> — 사이렌·경적은 최종 타겟 세 가지 소리(경적·사이렌·오토바이 배기음) 중 <strong>2개와 정확히 일치</strong>합니다. 즉 "분류 파이프라인이 도는지" 수준을 넘어, 실제로 잡아야 할 위험음 세 가지 중 두 가지는 이미 90%대 확신도로 실물 음원에서 구분해내고 있다는 뜻입니다. 남은 것은 오토바이 배기음 검증(전용 공개 데이터셋이 없어 직접 녹음 필요)뿐입니다.
+    </div>
+  </section>
+
+  <section>
+    <h2>Roadmap</h2>
+    <h3>다음 단계: 방향 추정과 거리 추정</h3>
+    <div class="section-body">
+      <p>지금까지는 <strong>"무슨 소리인지"</strong>를 맞혔다면, 다음 단계는 <strong>"그 소리가 어느 방향에서, 얼마나 가까이서 오는지"</strong>를 알아내는 것입니다. 설계는 이미 프로젝트 노트(<code>04_Sound_Localization/</code>, <code>05_Camera_Tracking/</code>)에 되어 있고, 멘토님 PoC 기획서의 구현 절차(신호수집 → GCC-PHAT 동기화 → TDoA/방위각 연산 → AI 분류 → 시각화)와도 순서가 일치합니다. 다만 오디오 분류처럼 실제 하드웨어로 붙여서 돌려보는 검증은 아직이고, 거리 추정 방식은 아래처럼 결정이 필요한 지점이 있습니다.</p>
+    </div>
+
+    <h4>1. 방향(DoA) 추정</h4>
+    <div class="section-body">
+      <p>분류에 쓴 채널(ch0)은 보드가 이미 AEC로 처리한 단일 채널이라 위상 정보가 왜곡되어 있어 방향 추정에는 쓸 수 없습니다. 방향 추정에는 raw mic 채널(ch1~4)을 별도로 뽑아 써야 합니다. 추천하는 순서는 다음과 같습니다.</p>
+    </div>
+    <ul class="steps">
+      <li>
+        <span>
+          <span class="step-title">하드웨어 내장 DoA부터 검증</span>
+          <span class="step-body">ReSpeaker 온보드 DSP가 이미 방향을 계산해 HID로 제공합니다. <code>04_Sound_Localization/빔포밍_알고리즘.md</code>에 있는 Seeed 공식 SDK(<code>tuning.py</code>, VID:PID <code>2886:0018</code>)가 오늘 실측한 하드웨어 ID와 정확히 일치 — 알고리즘을 새로 짤 필요 없이 가장 빨리 결과를 볼 수 있는 경로라 가장 먼저 붙여볼 것을 추천합니다.</span>
+        </span>
+      </li>
+      <li>
+        <span>
+          <span class="step-title">GCC-PHAT 자체 구현으로 교차검증</span>
+          <span class="step-body"><code>04_Sound_Localization/GCC_PHAT_구현.md</code>의 알고리즘 자체는 범용이라 그대로 재사용 가능합니다. 다만 노트의 마이크 좌표(6마이크 원형 배치, 반경 4.3cm)는 다른 모델(v2.1 원형 어레이) 기준이라, 실제 확정 하드웨어(4마이크 사각 배열 v2.0)와 기하학이 다릅니다 — 좌표를 Seeed 공식 스펙 기준으로 다시 정의해야 합니다.</span>
+        </span>
+      </li>
+      <li>
+        <span>
+          <span class="step-title">필요 시 SRP-PHAT으로 정밀화</span>
+          <span class="step-body">반향에 강하지만 연산량이 큽니다. 오늘 AST 추론이 CPU에서 3초 오디오에 4초 가까이 걸린 전례를 보면, 360도 전수탐색 SRP-PHAT도 Jetson CPU만으로는 버거울 수 있습니다 — 각도 그리드를 성기게 하거나, 분류용 스레드와 완전히 분리해 우선순위를 다르게 줘야 합니다.</span>
+        </span>
+      </li>
+      <li>
+        <span>
+          <span class="step-title">칼만 필터로 추적</span>
+          <span class="step-body">차량은 계속 움직이므로 순간 추정값을 그대로 쓰지 않고 추적이 필요합니다. 코드는 이미 <code>04_Sound_Localization/빔포밍_알고리즘.md</code>에 있습니다.</span>
+        </span>
+      </li>
+    </ul>
+
+    <h4>2. 거리 추정 — 하드웨어 방향 결정이 필요한 지점</h4>
+    <div class="section-body">
+      <p>우리는 지금까지 "마이크 간격이 수 cm(ReSpeaker)뿐이라 거리는 원천적으로 못 구한다"고 결론 내리고, 거리는 카메라가 전담하도록 설계해왔습니다. 그런데 멘토님 기획서는 마이크 3~4개를 후방 좌/우/중앙에 <strong>50cm 간격</strong>으로 넓게 배치해 삼각측량으로 대략적 거리까지 뽑는 구조를 제안하고 있어, 이 결론 자체를 다시 짚어봐야 합니다.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>항목</th><th>현재 구현 (ReSpeaker)</th><th>멘토님 기획서 제안</th></tr>
+        <tr><td>마이크 배치</td><td>일체형 배열, 마이크 간격 수 cm</td><td>개별 지향성 마이크 3~4개, 후방 좌/우/중앙 50cm 간격</td></tr>
+        <tr><td>필요 장비</td><td>USB 마이크 1개 (추가 ADC 불필요)</td><td>별도 멀티채널 오디오 인터페이스/ADC (24bit/48kHz 이상)</td></tr>
+        <tr><td>방향 추정</td><td>가능 — 온보드 DoA + GCC-PHAT</td><td>가능 — GCC-PHAT + 삼각측량</td></tr>
+        <tr><td>거리 추정</td><td>불가능 → 카메라(YOLO 단안거리)가 전담</td><td>가능 — 넓은 간격 덕분에 근거리 비평면파 가정 성립, 삼각측량으로 대략적 거리 산출</td></tr>
+      </table>
+    </div>
+    <div class="callout" style="margin-top:14px">
+      <strong>결정 필요</strong> — 마이크 간격을 넓히면 오디오만으로도 대략적 거리를 잡을 수 있다는 건 맞지만, 후방에 마이크 3~4개를 새로 분산 장착하고 멀티채널 ADC를 통합해야 해서 D-9 남은 일정에서 하드웨어를 바꾸는 리스크가 있습니다. 반면 지금 ReSpeaker+카메라 조합은 오늘 실물 검증까지 이미 끝난 상태입니다. "카메라 거리 추정을 유지" vs "넓은 간격 마이크로 교체해 오디오 거리 추정 시도" 중 이번 회의에서 방향을 정하는 게 좋겠습니다.
+    </div>
+
+    <h4>고려사항 및 주의점</h4>
+    <ul class="checklist">
+      <li>
+        <span class="tag blocker">채널 분리</span>
+        <span>분류(ch0, 4초 윈도우, 무거운 연산)와 방향추정(ch1~4, 훨씬 짧은 주기)은 요구 지연시간이 다릅니다. 하나의 스트림에서 두 갈래로 나누되 스레드/우선순위는 분리해야 분류 추론이 방향 갱신을 막지 않습니다.</span>
+      </li>
+      <li>
+        <span class="tag blocker">온보드 처리 간섭 가능성</span>
+        <span>ReSpeaker가 이미 자체적으로 AEC/노이즈 억제를 하고 있어 "raw"로 표기된 채널도 완전한 원시 신호가 아닐 수 있습니다. GCC-PHAT 결과가 이론과 안 맞으면 이 가능성부터 의심해볼 것.</span>
+      </li>
+      <li>
+        <span class="tag next">마이크 좌표 재확인</span>
+        <span>지금 노트의 좌표는 다른 모델 기준이라 그대로 쓰면 각도 계산이 처음부터 틀어집니다. 실측 또는 Seeed 공식 자료로 먼저 확정해야 합니다.</span>
+      </li>
+      <li>
+        <span class="tag next">좌표계 정합</span>
+        <span>DoA가 내놓는 "0도" 기준과 카메라 FOV의 "정면" 기준을 맞추는 설치 캘리브레이션이 한 번 필요합니다.</span>
+      </li>
+      <li>
+        <span class="tag next">검증 순서</span>
+        <span>소리 나는 위치를 미리 알고 있는 상태(예: 정면 0도, 좌측 90도에 스피커 고정)로 오차부터 잰 뒤, 움직이는 음원으로 넘어가는 순서를 권장합니다.</span>
+      </li>
+      <li>
+        <span class="tag blocker">지연시간 목표</span>
+        <span>멘토님 기획서는 데이터 수집~알림까지 전체 지연을 100~200ms로 제시합니다. 오늘 실측한 CPU 추론(3초 오디오에 약 4초)과 비교하면 20~40배 단축이 필요 — TensorRT 변환이 선택이 아니라 필수라는 근거로 그대로 쓸 수 있습니다.</span>
+      </li>
+      <li>
+        <span class="tag next">도플러 효과 보정</span>
+        <span>멘토님 기획서 지적사항 — 고속으로 접근·이탈하는 긴급차량 사이렌은 주파수가 왜곡돼 분류 정확도가 떨어질 수 있습니다. 현재 학습 데이터에는 이 보정이 없어, 배기음/사이렌 재학습 시 다양한 속도를 모사한 피치시프트 증강(data augmentation)을 반영할 필요가 있습니다.</span>
+      </li>
+      <li>
+        <span class="tag next">대역 필터링</span>
+        <span>멘토님 기획서는 500Hz~3kHz만 통과시키는 밴드패스 필터 + ANC를 1차 잡음 제거로 제안합니다. 현재는 300Hz 하이패스만 적용 중 — 경적/사이렌 대역에 맞춘 밴드패스를 추가하면 노면·풍절음 억제에 도움이 될 수 있습니다.</span>
+      </li>
+      <li>
+        <span class="tag next">AI 추론 프레임워크</span>
+        <span>기획서는 TensorFlow Lite/ONNX Runtime을 제안하지만, Jetson에는 TensorRT가 이미 설치돼 있습니다(JetPack 내장, 실측 v10.3.0). ONNX 경유로 변환하면 같은 목적(임베디드 실시간 추론)을 더 최적화된 방식으로 달성 가능 — 기존 설계(<code>03_Audio_Classification/모델_아키텍처.md</code>)와도 일치합니다.</span>
+      </li>
+      <li>
+        <span class="tag next">음속 온도보정 우선순위</span>
+        <span>기획서는 차량 외기 온도 센서 연동을 필수로 제시합니다. <code>04_Sound_Localization/TDoA_원리.md</code>에 온도 보정 함수는 이미 설계돼 있으나, 차량 실내 온도 변화폭이 크지 않다고 보고 우선순위를 낮춰뒀었습니다 — 기획서 기준에 맞출지 이번 회의에서 확인이 필요합니다.</span>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Remaining</h2>
+    <h3>그 외 남은 과제</h3>
+    <ul class="checklist">
+      <li>
+        <span class="tag blocker">한계</span>
+        <span>학습 클래스에 "무음/배경" 항목이 없어 어떤 소리든 10개 클래스 중 하나로 강제 분류됨. 최종 모델은 background 클래스를 반드시 포함해야 함.</span>
+      </li>
+      <li>
+        <span class="tag blocker">성능</span>
+        <span>CPU 추론만으로 3초 오디오에 약 3.9초 소요 — 실시간(수백 ms) 처리를 위해 TensorRT 변환/양자화 필요.</span>
+      </li>
+      <li>
+        <span class="tag next">데이터</span>
+        <span>오토바이 배기음은 전용 공개 데이터셋이 없어 직접 녹음 필요. 최종 4클래스(경적/사이렌/배기음/배경) 재학습용 데이터 확보 — AI Hub 승인 신청 포함.</span>
+      </li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>ReSpeaker-Vehicle-Alert-System</span>
+    <span>중간평가 마감 2026-07-14</span>
+  </footer>
+
+</div>
