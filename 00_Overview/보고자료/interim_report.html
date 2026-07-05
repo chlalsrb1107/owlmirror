@@ -473,6 +473,21 @@
       <strong>결정 필요</strong> — 마이크 간격을 넓히면 오디오만으로도 대략적 거리를 잡을 수 있다는 건 맞지만, 후방에 마이크 3~4개를 새로 분산 장착하고 멀티채널 ADC를 통합해야 해서 D-9 남은 일정에서 하드웨어를 바꾸는 리스크가 있습니다. 반면 지금 ReSpeaker+카메라 조합은 오늘 실물 검증까지 이미 끝난 상태입니다. "카메라 거리 추정을 유지" vs "넓은 간격 마이크로 교체해 오디오 거리 추정 시도" 중 이번 회의에서 방향을 정하는 게 좋겠습니다.
     </div>
 
+    <h4>Depth 카메라 실측 — 카메라 쪽 거리 추정도 오늘 검증함</h4>
+    <div class="section-body">
+      <p>오디오와 별개로, 확정 하드웨어인 <strong>Orbbec Gemini 215</strong>도 오늘 Jetson에 연결해 depth 스트림을 직접 읽어봤습니다. 손을 카메라 축 방향으로 가까이~멀리 이동시키며 유효 depth 범위를 실측한 결과, <strong>제품 스펙(0.15~0.70m)이 depth work mode에 따라 달라진다</strong>는 걸 확인했습니다.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Depth Work Mode</th><th>실측 유효거리</th><th>비고</th></tr>
+        <tr><td>Close_Up Precision Mode (기본값)</td><td>약 0.15~0.33m</td><td>아무 설정도 안 하면 이 모드로 동작 — 33cm에서 끊김</td></tr>
+        <tr><td>Extended Distance Mode</td><td>약 0.20~0.72m</td><td>문서 스펙(0.70m)과 일치, 명시적 전환 필요</td></tr>
+      </table>
+    </div>
+    <div class="callout" style="margin-top:14px">
+      <strong>의미</strong> — 이번 실측으로 "depth로는 차량 거리(수 m 이상)를 못 잰다"는 기존 결론은 그대로 재확인됐습니다(어느 모드든 최대 ~0.7m). 다만 "70cm 이내 초근접 경고"를 실제로 쓰려면 <strong>코드에서 Extended Distance Mode로 명시 전환해야 한다</strong>는 구현 디테일을 놓칠 뻔했습니다 — 기본값 그대로 두면 33cm에서 끊겨 절반도 못 미치는 범위만 동작했을 것입니다. 검증 스크립트는 <code>01_Hardware/code/probe_depth_range.py</code>에 정리해뒀습니다.
+    </div>
+
     <h4>고려사항 및 주의점</h4>
     <ul class="checklist">
       <li>
