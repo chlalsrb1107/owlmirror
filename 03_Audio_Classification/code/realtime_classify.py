@@ -74,7 +74,7 @@ def classify(model, feature_extractor, class_names, audio_f32: np.ndarray):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seconds", type=float, default=4.0,
+    parser.add_argument("--seconds", type=float, default=1.0,
                         help="분류 1회당 사용하는 오디오 길이 (초). 학습 시 사용한 길이(4.0s)와 맞추는 것을 권장")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="분류 반복 주기 (초)")
