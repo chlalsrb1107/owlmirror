@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>주행 위험 인지 시스템 · 화면 시안</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<style>
+  :root{--page:#08080A;--panel:#131316;--edge:#232327;--txt:#F5F5F5;--dim:#7A7A82;
+        --teal:#00C2C7;--yel:#FFD400;--red:#FF3B30;--gray:#3A3E48}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--page);color:var(--txt);
+    font-family:Pretendard,-apple-system,'Malgun Gothic',sans-serif;padding:26px}
+  .wrap{max-width:1520px;margin:0 auto}
+  header{margin-bottom:20px}
+  h1{font-size:19px;font-weight:600;letter-spacing:-.02em}
+  .sub{font-size:13px;color:var(--dim);margin-top:6px}
+  .grid{display:grid;grid-template-columns:246px 1fr;gap:20px;align-items:start}
+  @media(max-width:920px){.grid{grid-template-columns:1fr}}
+  nav{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:8px}
+  .glabel{font-size:10.5px;color:var(--dim);padding:12px 10px 5px;letter-spacing:.08em}
+  button.sc{display:flex;gap:9px;width:100%;text-align:left;background:transparent;border:0;
+    color:#C9C9D0;font-family:inherit;font-size:13.5px;padding:9px 10px;border-radius:7px;
+    cursor:pointer;transition:background .12s,color .12s}
+  button.sc:hover{background:#1B1B1F;color:var(--txt)}
+  button.sc[aria-pressed="true"]{background:var(--teal);color:#00201F;font-weight:600}
+  button.sc:focus-visible{outline:2px solid var(--teal);outline-offset:-2px}
+  .num{color:#55555E;font-variant-numeric:tabular-nums;flex:none}
+  button.sc[aria-pressed="true"] .num{color:#00403E}
+  .stage{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:14px}
+  svg.screen{width:100%;aspect-ratio:16/9;border-radius:8px;display:block;background:#0B0B0B}
+  #bev,#hud,#glow{transition:opacity .18s ease}
+  .key{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
+  .kbox{background:#0E0E11;border:1px solid var(--edge);border-radius:8px;padding:11px 13px;
+    display:flex;align-items:center;gap:12px}
+  .kbox svg{flex:none}
+  .kt{font-size:13.5px;font-weight:600}
+  .kd{font-size:11px;color:var(--dim);margin-top:3px;line-height:1.45}
+  .spec{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:10px}
+  @media(max-width:740px){.spec,.key{grid-template-columns:repeat(2,1fr)}}
+  .cell{background:#0E0E11;border:1px solid var(--edge);border-radius:8px;padding:11px 12px}
+  .ck{font-size:10.5px;color:var(--dim);letter-spacing:.05em}
+  .cv{font-size:14px;margin-top:6px;display:flex;align-items:center;gap:7px}
+  .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  .note{margin-top:10px;font-size:12.5px;color:#9C9CA4;line-height:1.7;
+    background:#0E0E11;border:1px solid var(--edge);border-radius:8px;padding:13px 15px}
+  .note b{color:var(--txt);font-weight:600}
+  @media(prefers-reduced-motion:reduce){#bev,#hud,#glow{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>주행 위험 인지 시스템 · 화면 시안</h1>
+    <p class="sub">1920 × 1080 기준 · 종류는 형태로, 위험도는 색으로 구분합니다</p>
+  </header>
+
+  <div class="grid">
+    <nav id="nav" aria-label="시나리오"></nav>
+    <div class="stage">
+      <svg class="screen" id="scr" viewBox="0 0 1920 1080" role="img" aria-labelledby="st">
+        <title id="st">주행 위험 인지 시스템 디스플레이 화면</title>
+        <defs>
+          <filter id="gl" x="-70%" y="-70%" width="240%" height="240%">
+            <feGaussianBlur stdDeviation="40"/></filter>
+          <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="9"/></filter>
+        </defs>
+        <rect width="1920" height="1080" fill="#0B0B0B"/>
+        <g id="glow"></g><g id="bev"></g><g id="hud"></g>
+      </svg>
+      <div class="key" id="key"></div>
+      <div class="spec" id="spec"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+const C={teal:"#00C2C7",yel:"#FFD400",red:"#FF3B30",gray:"#3A3E48",txt:"#F5F5F5",dim:"#7A7A82"};
+const CX=960, CY=560, RMAX=400, BLIND=6, F="Pretendard";
+const NS="http://www.w3.org/2000/svg";
+const r=m=>Math.sqrt(Math.min(m,40)/40)*RMAX;
+const xy=(d,m)=>{const a=(d-90)*Math.PI/180;return[CX+Math.cos(a)*r(m),CY+Math.sin(a)*r(m)];};
+const el=(t,a,x)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);
+  if(x!=null)e.textContent=x;return e;};
+const $=i=>document.getElementById(i);
+
+/* ── 종류 글리프 : 100×100 기준, 중심 (0,0) ── */
+function glyph(kind,col,sw){
+  const g=el("g",{}), W=sw||7;
+  const S={fill:"none",stroke:col,"stroke-width":W,"stroke-linecap":"round","stroke-linejoin":"round"};
+  if(kind==="horn"){                       // 퍼지는 음파
+    g.appendChild(el("path",{...S,d:"M-34 -16 L-34 16 L-16 24 L-16 -24 Z",fill:col,stroke:"none"}));
+    [16,30,44].forEach((R,i)=>g.appendChild(el("path",{...S,"stroke-width":W-i*0.6,
+      d:`M-6 ${-R*0.72} A ${R} ${R} 0 0 1 -6 ${R*0.72}`})));
+  }else if(kind==="siren"){                // 경광등
+    g.appendChild(el("path",{...S,d:"M-24 10 A 24 24 0 0 1 24 10",fill:col,stroke:"none"}));
+    g.appendChild(el("rect",{x:-32,y:10,width:64,height:13,rx:5,fill:col}));
+    g.appendChild(el("path",{...S,d:"M-40 -22 L-30 -12"}));
+    g.appendChild(el("path",{...S,d:"M40 -22 L30 -12"}));
+    g.appendChild(el("path",{...S,d:"M0 -42 L0 -30"}));
+  }else{                                   // 오토바이
+    g.appendChild(el("circle",{...S,cx:-28,cy:16,r:15}));
+    g.appendChild(el("circle",{...S,cx:28,cy:16,r:15}));
+    g.appendChild(el("path",{...S,d:"M-28 16 L-10 -10 L14 -10 L28 16"}));
+    g.appendChild(el("path",{...S,d:"M-10 -10 L-24 -24"}));
+  }
+  return g;
+}
+const place=(kind,col,cx,cy,scale,sw)=>{
+  const w=el("g",{transform:`translate(${cx} ${cy}) scale(${scale})`});
+  w.appendChild(glyph(kind,col,sw)); return w;
+};
+
+/* ── 종류별 마커 실루엣 ── */
+function marker(kind,x,y,deg,col){
+  const g=el("g",{transform:`rotate(${deg} ${x} ${y})`});
+  if(kind==="moto"){                       // 좁고 짧게 — 실제 폭을 반영
+    g.appendChild(el("rect",{x:x-9,y:y-22,width:18,height:44,rx:8,fill:col}));
+    g.appendChild(el("circle",{cx:x,cy:y-27,r:5,fill:col,opacity:.75}));
+  }else if(kind==="siren"){                // 넓고 길게 + 지붕 경광등
+    g.appendChild(el("rect",{x:x-19,y:y-31,width:38,height:62,rx:9,fill:col}));
+    g.appendChild(el("rect",{x:x-14,y:y-40,width:28,height:8,rx:4,fill:col}));
+    g.appendChild(el("path",{d:`M${x-24} -0 L${x-32} 0`,stroke:col,"stroke-width":4,
+      "stroke-linecap":"round",transform:`translate(0 ${y})`}));
+    g.appendChild(el("path",{d:`M${x+24} 0 L${x+32} 0`,stroke:col,"stroke-width":4,
+      "stroke-linecap":"round",transform:`translate(0 ${y})`}));
+  }else{                                   // 일반 차량
+    g.appendChild(el("rect",{x:x-15,y:y-26,width:30,height:52,rx:7,fill:col}));
+  }
+  return g;
+}
+
+const arcPath=(a,sp,R)=>{
+  const p=d=>{const t=(d-90)*Math.PI/180;return[CX+Math.cos(t)*R,CY+Math.sin(t)*R];};
+  const[x1,y1]=p(a-sp/2),[x2,y2]=p(a+sp/2);
+  return`M${x1.toFixed(1)} ${y1.toFixed(1)} A${R} ${R} 0 0 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+};
+const wedgePath=(a,sp,R)=>{
+  const p=d=>{const t=(d-90)*Math.PI/180;return[CX+Math.cos(t)*R,CY+Math.sin(t)*R];};
+  const[x1,y1]=p(a-sp/2),[x2,y2]=p(a+sp/2);
+  return`M${CX} ${CY} L${x1.toFixed(1)} ${y1.toFixed(1)} A${R} ${R} 0 0 1 ${x2.toFixed(1)} ${y2.toFixed(1)} Z`;
+};
+
+const S=[
+{n:"평상시",k:null,g:"—",lv:"없음",col:null,idle:1,
+ note:"소리가 없으면 기존 화면 보호기를 그대로 둡니다."},
+
+{n:"경적",k:"horn",g:"경적",lv:"주의",col:C.yel,edge:{d:"r",c:C.yel},
+ wedge:{a:78,s:38},ripple:1,loc:"우측",pip:"우측 카메라",
+ note:"경적은 거리를 알 수 없어 지도에는 방향만 남깁니다. 부채꼴 안에 <b>자차로 밀려오는 음파 무늬</b>를 넣어, 마커가 없어도 소리가 나를 향한다는 것이 읽히게 했습니다. 대신 해당 방향 카메라를 함께 띄웁니다."},
+
+{n:"사이렌 · 위치 미확정",k:"siren",g:"사이렌",lv:"주의",col:C.yel,edge:{d:"b",c:C.yel},
+ wedge:{a:188,s:44},loc:"후방",cars:[[152,26],[214,33]],
+ note:"부채꼴 폭이 곧 방향 오차입니다. 회색은 지도에 잡혔으나 음원으로 확정되지 않은 차량입니다."},
+
+{n:"사이렌 · 차량 확정",k:"siren",g:"사이렌",lv:"경고",col:C.red,edge:{d:"b",c:C.red},
+ loc:"후방 접근",cars:[[152,26]],tgt:[{a:194,m:24,c:C.red,k:"siren",lab:"24m"}],pip:"후방 카메라",
+ note:"경광등 점멸로 찾아내고 LiDAR가 거리를 채운 상태입니다. <b>마커 지붕의 가로 막대와 양옆 섬광이 긴급차량 표식</b>이라 글자를 읽지 않아도 구분됩니다."},
+
+{n:"사이렌 · 여러 대",k:"siren",g:"사이렌",lv:"경고",col:C.red,edge:{d:"b",c:C.red},
+ loc:"후방 접근",tgt:[{a:194,m:24,c:C.red,k:"siren",lab:"24m"},
+ {a:166,m:33,c:C.red,k:"siren",lab:"33m"}],pip:"후방 카메라",
+ note:"두 대 이상이면 각각 표시하고, 영상은 가장 가까운 차량 쪽을 띄웁니다."},
+
+{n:"오토바이 · 멀어짐",k:"moto",g:"오토바이",lv:"표시",col:C.gray,
+ cars:[[42,22]],tgt:[{a:324,m:30,c:C.gray,k:"moto"}],
+ note:"멀어지는 중이면 회색 마커만 두고 알림은 띄우지 않습니다. <b>매번 경고하면 운전자가 곧 알림 자체를 무시하게 됩니다.</b>"},
+
+{n:"오토바이 · 접근",k:"moto",g:"오토바이",lv:"주의",col:C.yel,edge:{d:"l",c:C.yel},
+ loc:"좌측 후방",tgt:[{a:242,m:19,c:C.yel,k:"moto",lab:"19m"}],
+ note:"오토바이 마커는 <b>폭이 절반이고 앞머리에 전조등 점</b>이 있어, 승용차 마커와 한눈에 갈립니다. 실제 차폭 차이를 그대로 옮긴 형태입니다."},
+
+{n:"오토바이 · 근접",k:"moto",g:"오토바이",lv:"경고",col:C.red,edge:{d:"l",c:C.red,st:1},
+ loc:"좌측 근접",tgt:[{a:254,m:11,c:C.red,k:"moto",lab:"11m",pulse:1}],
+ note:"15m 이내로 붙으면 해당 방향 테두리를 강하게 밝힙니다. 깜빡임 주기는 거리에 반비례하게 둡니다."},
+
+{n:"오토바이 · 사각지대",k:"moto",g:"오토바이",lv:"경고",col:C.red,edge:{d:"l",c:C.red,st:1},
+ loc:"좌측 사각지대",blind:{a:264,s:96},
+ note:"차 옆을 스칠 때는 LiDAR가 보지 못합니다. 점 하나로 찍으면 없는 정확도를 있는 것처럼 보이므로, <b>사각 구역 자체를 띄웁니다.</b> 늘 흐리게 깔려 있던 안쪽 원이 해당 방향만 붉게 차오릅니다."},
+
+{n:"오토바이 · 골목",k:"moto",g:"오토바이",lv:"주의",col:C.yel,edge:{d:"l",c:C.yel},
+ wedge:{a:296,s:32},oos:1,loc:"좌측 골목",
+ note:"벽에 가려 카메라와 LiDAR가 볼 수 없습니다. 방향은 오토바이가 아니라 <b>골목 입구</b>를 가리키고, 운전자가 실제로 봐야 할 곳도 그곳입니다."}
+];
+
+function draw(i){
+  const s=S[i], G=$("glow"), B=$("bev"), H=$("hud");
+  [G,B,H].forEach(n=>n.replaceChildren());
+
+  if(s.edge){
+    const w=s.edge.st?170:120, o=s.edge.st?.9:.45;
+    const m={l:[-60,0,w,1080],r:[1920-w+60,0,w,1080],
+             b:[0,1080-w+60,1920,w],t:[0,-60,1920,w]}[s.edge.d];
+    G.appendChild(el("rect",{x:m[0],y:m[1],width:m[2],height:m[3],fill:s.edge.c,
+      opacity:o,filter:"url(#gl)"}));
+  }
+  if(s.idle){
+    H.appendChild(el("text",{x:160,y:600,fill:C.txt,"font-size":210,"font-weight":600,
+      "font-family":F,"letter-spacing":-8},"10:42"));
+    H.appendChild(el("text",{x:170,y:680,fill:C.dim,"font-size":38,"font-family":F},"6월 30일 월요일"));
+    return info(i);
+  }
+
+  /* 눈금 */
+  B.appendChild(el("circle",{cx:CX,cy:CY,r:r(BLIND),fill:"#101216",stroke:"#1C1F25","stroke-width":1}));
+  [10,20,40].forEach(m=>{
+    B.appendChild(el("circle",{cx:CX,cy:CY,r:r(m),fill:"none",stroke:"#1E2128",
+      "stroke-width":1,"stroke-dasharray":m===40?"3 9":"none"}));
+    B.appendChild(el("text",{x:CX+8,y:CY-r(m)+24,fill:"#3E434D","font-size":18,"font-family":F},m+"m"));
+  });
+  [["전",0],["우",90],["후",180],["좌",270]].forEach(([t,d])=>{
+    const[x,y]=xy(d,40.6);
+    B.appendChild(el("text",{x,y:y+7,fill:"#3E434D","font-size":19,"font-family":F,"text-anchor":"middle"},t));
+  });
+
+  /* 사각 구역 점등 */
+  if(s.blind){
+    B.appendChild(el("path",{d:wedgePath(s.blind.a,s.blind.s,r(BLIND)),fill:C.red,opacity:.34}));
+    B.appendChild(el("path",{d:wedgePath(s.blind.a,s.blind.s,r(BLIND)),fill:"none",
+      stroke:C.red,"stroke-width":3,opacity:.9,filter:"url(#soft)"}));
+    const[lx,ly]=xy(s.blind.a,15);
+    B.appendChild(place("moto",C.red,lx,ly-34,.62,8));
+    B.appendChild(el("text",{x:lx,y:ly+28,fill:C.red,"font-size":25,"font-weight":600,
+      "font-family":F,"text-anchor":"middle"},"사각지대"));
+    B.appendChild(el("text",{x:lx,y:ly+56,fill:C.red,"font-size":21,"font-family":F,
+      "text-anchor":"middle",opacity:.8},"위치 추정 불가"));
+  }
+
+  /* 부채꼴 */
+  if(s.wedge){
+    const{a,s:sp}=s.wedge, c=s.col;
+    B.appendChild(el("path",{d:wedgePath(a,sp,RMAX*1.02),fill:c,opacity:.13}));
+    B.appendChild(el("path",{d:wedgePath(a,sp,RMAX*1.02),fill:"none",stroke:c,
+      "stroke-width":2,opacity:.45}));
+    if(s.ripple)[16,25,34].forEach((m,j)=>
+      B.appendChild(el("path",{d:arcPath(a,sp*0.78,r(m)),fill:"none",stroke:c,
+        "stroke-width":6-j*1.2,opacity:.62-j*.14,"stroke-linecap":"round"})));
+    const[gx,gy]=xy(a,s.oos?27:31);
+    B.appendChild(place(s.k,c,gx,gy,.66,8));
+    if(s.oos)B.appendChild(el("text",{x:gx,y:gy+52,fill:c,"font-size":24,"font-weight":600,
+      "font-family":F,"text-anchor":"middle"},"시야 밖"));
+  }
+
+  /* 주변 차량 */
+  (s.cars||[]).forEach(([a,m])=>{const[x,y]=xy(a,m);B.appendChild(marker("car",x,y,a,C.gray));});
+
+  /* 대상 마커 */
+  (s.tgt||[]).forEach(t=>{
+    const[x,y]=xy(t.a,t.m);
+    if(t.c!==C.gray){
+      B.appendChild(el("circle",{cx:x,cy:y,r:60,fill:t.c,opacity:.13}));
+      if(t.pulse)B.appendChild(el("circle",{cx:x,cy:y,r:78,fill:"none",stroke:t.c,
+        "stroke-width":2,opacity:.32}));
+    }
+    B.appendChild(marker(t.k,x,y,t.a,t.c));
+    if(t.lab){
+      const left=x<CX, lx=left?x-40:x+40, an=left?"end":"start";
+      B.appendChild(el("text",{x:lx,y:y+9,fill:t.c,"font-size":26,"font-weight":600,
+        "font-family":F,"text-anchor":an},t.lab));
+    }
+  });
+
+  /* 자차 */
+  B.appendChild(el("rect",{x:CX-18,y:CY-30,width:36,height:60,rx:9,fill:"none",
+    stroke:C.teal,"stroke-width":3}));
+  B.appendChild(el("path",{d:`M${CX-10} ${CY-7} L${CX} ${CY-20} L${CX+10} ${CY-7}`,fill:"none",
+    stroke:C.teal,"stroke-width":3,"stroke-linecap":"round","stroke-linejoin":"round"}));
+
+  /* 상단 알림 : 큰 표식 + 종류 + 방향 */
+  if(s.lv==="표시"){
+    H.appendChild(place("moto",C.dim,148,124,.5,8));
+    H.appendChild(el("text",{x:200,y:136,fill:C.dim,"font-size":30,"font-family":F},
+      "주변 오토바이 1대 · 알림 없음"));
+  }else{
+    H.appendChild(el("rect",{x:112,y:70,width:118,height:118,rx:26,fill:s.col}));
+    H.appendChild(place(s.k,"#0B0B0B",171,129,.82,9));
+    H.appendChild(el("text",{x:262,y:132,fill:C.txt,"font-size":54,"font-weight":600,
+      "font-family":F},s.g));
+    H.appendChild(el("text",{x:262,y:178,fill:s.col,"font-size":28,"font-weight":600,
+      "font-family":F},s.lv));
+    H.appendChild(el("text",{x:262,y:178,fill:C.dim,"font-size":28,"font-family":F,
+      dx:s.lv.length*29+14},s.loc));
+  }
+
+  /* 보조 영상 */
+  if(s.pip){
+    H.appendChild(el("rect",{x:1372,y:748,width:452,height:254,rx:10,fill:"#141619",
+      stroke:"#2B2F38","stroke-width":2}));
+    H.appendChild(el("rect",{x:1462,y:812,width:272,height:126,rx:7,fill:"#1E222A"}));
+    H.appendChild(el("text",{x:1598,y:884,fill:"#565C68","font-size":24,"font-family":F,
+      "text-anchor":"middle"},s.pip));
+    H.appendChild(el("text",{x:1372,y:728,fill:C.dim,"font-size":21,"font-family":F},"보조 영상"));
+  }
+  info(i);
+}
+
+function info(i){
+  const s=S[i];
+  const loc=s.blind?"구역만 표시":s.tgt&&s.tgt[0].lab?"거리 확정":s.wedge?"방향만":s.tgt?"위치만":"없음";
+  $("spec").innerHTML=[["소리",s.g,null],["위험 단계",s.lv,s.col],["위치 정보",loc,null],
+    ["보조 영상",s.pip||"표시 안 함",null]].map(([k,v,c])=>
+    `<div class="cell"><div class="ck">${k}</div><div class="cv">${
+      c?`<span class="sw" style="background:${c}"></span>`:""}${v}</div></div>`).join("");
+  $("note").innerHTML=s.note;
+}
+
+/* 표식 범례 */
+[["horn","경적","퍼지는 음파 · 위치 없이 방향만"],
+ ["siren","사이렌","지붕 경광등과 양옆 섬광"],
+ ["moto","오토바이","좁은 폭과 앞머리 전조등"]].forEach(([k,t,d])=>{
+  const b=document.createElement("div"); b.className="kbox";
+  const sv=document.createElementNS(NS,"svg");
+  sv.setAttribute("viewBox","-56 -56 112 112"); sv.setAttribute("width","38");
+  sv.setAttribute("height","38"); sv.setAttribute("aria-hidden","true");
+  sv.appendChild(glyph(k,"#F5F5F5",8));
+  b.appendChild(sv);
+  const w=document.createElement("div");
+  w.innerHTML=`<div class="kt">${t}</div><div class="kd">${d}</div>`;
+  b.appendChild(w); $("key").appendChild(b);
+});
+
+const nav=$("nav");
+[["기본",[0]],["경적",[1]],["사이렌",[2,3,4]],["오토바이",[5,6,7,8,9]]].forEach(([g,idx])=>{
+  const h=document.createElement("div"); h.className="glabel"; h.textContent=g; nav.appendChild(h);
+  idx.forEach(i=>{
+    const b=document.createElement("button");
+    b.className="sc"; b.type="button"; b.dataset.i=i;
+    b.setAttribute("aria-pressed",i===0);
+    b.innerHTML=`<span class="num">${String(i+1).padStart(2,"0")}</span><span>${S[i].n}</span>`;
+    nav.appendChild(b);
+  });
+});
+nav.addEventListener("click",e=>{
+  const b=e.target.closest("button.sc"); if(!b)return;
+  nav.querySelectorAll("button.sc").forEach(x=>x.setAttribute("aria-pressed",x===b));
+  draw(+b.dataset.i);
+});
+draw(0);
+</script>
+</body>
+</html>
