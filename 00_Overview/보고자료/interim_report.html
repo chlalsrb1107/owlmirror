@@ -445,6 +445,28 @@
   </section>
 
   <section>
+    <h2>Differentiation</h2>
+    <h3>선행 수상작 대비 차별화 — 거리 추정 + 일정시간 추적</h3>
+    <div class="section-body">
+      <p>2025년 임베디드소프트웨어 경진대회 자동차/모빌리티 부문 대상(산업통상부 장관상)은 수원대학교의 <strong>EARS</strong>로, 우리 시스템과 문제의식(차량 위험음 감지·알림)이 상당 부분 겹칩니다. 다만 공개된 수상작 정보 기준으로 해당 작품은 <strong>소리가 난 방향을 알리는 데 그치는 구조</strong>(룸미러 방향 텍스트/화살표 표시, 시트·핸들 진동 피드백)로 파악되며, "그 소리가 얼마나 가까이서 오는지"와 "위험이 시간에 따라 어떻게 변하는지"는 다루지 않습니다.</p>
+      <p>우리는 이 지점을 업그레이드 포인트로 잡았습니다. 방향(DoA)만 알려주는 대신, <strong>거리 정보를 계산</strong>하고 <strong>일정 시간 동안 추적</strong>해 위험도가 시간에 따라 어떻게 변하는지(접근 중인지, 경로가 교차할지)까지 판단해서 알려주는 방향으로 시스템을 설계하고 있습니다.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>항목</th><th>선행 대상작 (EARS, 2025)</th><th>본 프로젝트 (업그레이드)</th></tr>
+        <tr><td>출력 정보</td><td>방향(텍스트/화살표), 진동 피드백</td><td>방향 + <span class="hi">거리</span> + <span class="hi">시간에 따른 추적 결과</span></td></tr>
+        <tr><td>판단 방식</td><td>순간 방향 감지 → 즉시 알림</td><td>DoA 각도 변화(칼만필터) + bbox 크기 변화(접근속도)로 "몇 초 후 경로 교차 예상" 등 예측형 판단</td></tr>
+        <tr><td>거리 추정</td><td>미언급</td><td>카메라 RGB 스트림 YOLO 바운딩박스 폭 기반 단안거리 추정</td></tr>
+        <tr><td>알림 방식</td><td>차량 내 룸미러/시트/핸들 (차량 종속)</td><td>BLE로 폰/워치 컴패니언 알림 (차량 개조 불필요, 범용)</td></tr>
+      </table>
+    </div>
+    <div class="callout" style="margin-top:14px">
+      <strong>차별화 근거</strong> — "어느 방향에서 소리가 났다"는 이미 작년 대상작이 다룬 문제입니다. 우리는 여기에 거리 축과 시간 축을 더해 <strong>"몇 초 뒤 내 경로와 교차할 위험이 있는 차량이 어느 것인지"</strong>까지 판단하는 것을 핵심 차별점으로 삼았습니다.
+      <div style="margin-top:8px; font-size:12.5px;"><a href="https://www.eswcontest.or.kr/data/award.php?ptype=view&idx=5649&page=1&code=award" style="color:var(--text-dim)">참고: 2025 임베디드소프트웨어 경진대회 수상작 EARS(수원대학교) 상세 페이지</a></div>
+    </div>
+  </section>
+
+  <section>
     <h2>Roadmap</h2>
     <h3>다음 단계: 방향 추정과 거리 추정</h3>
     <div class="section-body">
