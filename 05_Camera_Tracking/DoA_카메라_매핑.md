@@ -1,105 +1,52 @@
 # DoA → 카메라 매핑
 
+> ⚠️ 이전 버전(어안 카메라 1대 + 소프트웨어 ROI 이동, PTZ VISCA 제어)은 폐기됨. 확정 하드웨어는 **고정 카메라 4대(전/후/좌/우 90° 간격)**이므로 어안 ROI 매핑·PTZ 제어 로직 자체가 불필요하다. 배경: `00_Overview/현재_상태_요약.md` "카메라 구성" 절.
+
 ## 좌표계 정의
 
 ```
-차량 전방 = 0° (또는 360°)
-우측      = 90°
+차량 전방 = 0°  (반시계 방향이 +)
+좌측      = 90°
 후방      = 180°
-좌측      = 270°
-
-카메라 Pan 범위: -180° ~ +180° (또는 0° ~ 360°)
+우측      = 270° (또는 -90°)
 ```
 
-마이크 어레이와 카메라의 기준 방향(전방)을 물리적으로 정렬하거나, 오프셋 보정값을 설정한다.
+Jetson→노트북 인터페이스의 `theta` 필드가 이 좌표계를 그대로 따른다 (`00_Overview/현재_상태_요약.md` "Jetson→노트북 인터페이스" 절 참고).
+
+카메라 4대는 각각 90° 구간을 담당하도록 고정 장착되어 있으므로, **소프트웨어로 시야를 이동시킬 필요가 없다** — 방향에 맞는 카메라를 "선택"하기만 하면 된다.
 
 ---
 
-## 어안 카메라 ROI 매핑
-
-카메라를 고정하고 소프트웨어로 ROI를 이동시키는 방식.
+## 방향 → 카메라 선택 로직
 
 ```python
-import numpy as np
-import cv2
+CAMERA_RANGES = {
+    "front": (-45, 45),
+    "left":  (45, 135),
+    "rear":  (135, 225),   # 225 == -135
+    "right": (-135, -45),
+}
 
-class FisheyeTracker:
-    def __init__(self, frame_w=1920, frame_h=1080,
-                 roi_w=640, roi_h=480, camera_fov=160):
-        self.frame_w = frame_w
-        self.frame_h = frame_h
-        self.roi_w = roi_w
-        self.roi_h = roi_h
-        self.px_per_deg = frame_w / camera_fov
-        # 전방(0°)이 프레임 중앙에 오도록 오프셋 설정
-        self.forward_px = frame_w // 2
-
-    def doa_to_roi(self, doa_deg: float) -> tuple[int, int, int, int]:
-        """
-        DoA 각도로부터 ROI (x1, y1, x2, y2) 계산.
-        전방 0° 기준, 우측 양수, 좌측 음수.
-        """
-        # 전방 기준 상대 각도 (-180 ~ +180)
-        rel_deg = (doa_deg + 180) % 360 - 180
-        center_x = int(self.forward_px + rel_deg * self.px_per_deg)
-        center_x = np.clip(center_x, self.roi_w // 2,
-                           self.frame_w - self.roi_w // 2)
-        x1 = center_x - self.roi_w // 2
-        y1 = (self.frame_h - self.roi_h) // 2
-        return x1, y1, x1 + self.roi_w, y1 + self.roi_h
-
-    def get_roi_frame(self, full_frame: np.ndarray,
-                      doa_deg: float) -> np.ndarray:
-        x1, y1, x2, y2 = self.doa_to_roi(doa_deg)
-        return full_frame[y1:y2, x1:x2].copy()
+def select_camera(theta_deg: float) -> str:
+    """theta(0~360 또는 -180~180)를 정규화해 담당 카메라 이름 반환"""
+    rel = (theta_deg + 180) % 360 - 180  # -180~180으로 정규화
+    for name, (lo, hi) in CAMERA_RANGES.items():
+        if lo <= rel < hi:
+            return name
+    return "front"  # 경계값 예외 처리
 ```
+
+- 방향 오차(sigma)가 커서 경계 부근이면 인접한 두 카메라를 함께 후보로 둘지는 UI 설계(`ui_state_spec.md`의 "부채꼴 표시" 원칙)와 맞춰 결정 필요.
+- 실제 ROS2 구조에서는 이 선택 로직이 `matching_node`(`07_System_Integration/전체_시스템_통합.md` 참고)에서 실행되어, 선택된 카메라의 `/camera_{dir}/image_raw`를 UI가 PIP로 표시한다.
 
 ---
 
-## PTZ 카메라 Pan/Tilt 제어 (VISCA 프로토콜)
+## 다중 대상 처리 우선순위
 
-Sony VISCA 프로토콜은 PTZ 카메라 제어에 널리 사용된다.
-
-```python
-import serial
-
-class VISCAController:
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600):
-        self.ser = serial.Serial(port, baudrate, timeout=1)
-
-    def _send(self, cmd: bytes):
-        self.ser.write(cmd)
-
-    def pan_tilt_absolute(self, pan_deg: float, tilt_deg: float,
-                          pan_speed: int = 10, tilt_speed: int = 10):
-        # VISCA 각도 단위 변환 (제조사별 상이)
-        pan_pos = int(pan_deg * 182.044)   # 예: 0x0000 ~ 0xFFFF
-        tilt_pos = int(tilt_deg * 182.044)
-
-        pan_h = (pan_pos >> 8) & 0xFF
-        pan_l = pan_pos & 0xFF
-        tilt_h = (tilt_pos >> 8) & 0xFF
-        tilt_l = tilt_pos & 0xFF
-
-        cmd = bytes([
-            0x81, 0x01, 0x06, 0x02,
-            pan_speed, tilt_speed,
-            (pan_h >> 4) & 0x0F, pan_h & 0x0F,
-            (pan_l >> 4) & 0x0F, pan_l & 0x0F,
-            (tilt_h >> 4) & 0x0F, tilt_h & 0x0F,
-            (tilt_l >> 4) & 0x0F, tilt_l & 0x0F,
-            0xFF
-        ])
-        self._send(cmd)
-
-    def close(self):
-        self.ser.close()
-```
+여러 방향에서 동시에 소리가 감지되면, 화면에는 모든 대상을 지도에 표시하되 **PIP 카메라 영상은 가장 가까운(또는 가장 위험한) 대상 방향 카메라 하나만 우선 표시**한다. 우선순위 기준은 `00_Overview/현재_상태_요약.md` "소리 우선순위(동시 감지 시)" 절을 따른다.
 
 ---
 
-## 추적 전략
+## 위치 미확정 시 표시 원칙
 
-1. **즉시 반응**: DoA가 현재 뷰에서 ±30° 이상 벗어나면 즉시 카메라 이동
-2. **부드러운 추적**: 칼만 필터 DoA가 점진적으로 변하면 속도 제한을 두고 이동
-3. **음원 소멸 후 복귀**: 경보 종료 3초 후 전방(0°)으로 복귀
+LiDAR 매칭으로 특정 차량을 아직 확정하지 못한 경우, 카메라 선택은 되어도 **지도에는 마커를 찍지 않고 방향(부채꼴)만** 표시한다 — "잘못된 지목은 알려주지 않는 것보다 위험하다"는 UI 원칙(`ui_state_spec.md`)과 일관되게 유지한다.
