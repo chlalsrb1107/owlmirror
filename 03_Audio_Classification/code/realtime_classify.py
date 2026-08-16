@@ -1,32 +1,49 @@
 """
 realtime_classify.py
-ReSpeaker 4 Mic Array -> AST(Audio Spectrogram Transformer) 실시간 소리 분류 데모
+ReSpeaker 4 Mic Array -> PANNs Cnn14(16kHz) 임베딩 -> SVM 실시간 소리 분류 데모
 
 실행:
     python3 realtime_classify.py
-    python3 realtime_classify.py --seconds 3 --interval 1.5
-    python3 realtime_classify.py --model-path /path/to/best.pt
+    python3 realtime_classify.py --seconds 4 --interval 2.0
+    python3 realtime_classify.py --svm-path /path/to/best.pt --panns-checkpoint /path/to/Cnn14_16k_mAP=0.438.pth
 
-사용 모델: 03_Audio_Classification/model_outputs/outputs_ast/best.pt (저장소에는 용량 문제로 미포함,
-  outputs_ast.zip에서 복원해 이 경로에 두거나 --model-path로 위치를 지정할 것)
-  - MIT/ast-finetuned-audioset-10-10-0.4593 기반, UrbanSound8K 10클래스로 파인튜닝
-  - 검증 정확도 91.0%
+사용 모델 (2026-08-17부로 적용 — 팀원이 학습해 전달한 5클래스 모델. 한때 "AST"로 문서화된 적이 있었으나
+실제 체크포인트를 열어 확인한 결과 AST가 아니라 아래 구성임, 00_Overview/현재_상태_요약.md 참고):
+    03_Audio_Classification/model_outputs/panns_svm/best.pt (저장소에는 용량 문제로 미포함, model_outputs/panns_svm/README.md 참고)
+    - 특징 추출: PANNs Cnn14 (16kHz 사전학습, Zenodo 배포본 Cnn14_16k_mAP=0.438.pth) -> 2048차원 임베딩
+      * 로컬에 없으면 최초 실행 시 Zenodo에서 자동 다운로드 시도 (약 340MB, 인터넷 필요)
+    - 분류: 임베딩 위에 학습한 sklearn SVM (StandardScaler + SVC, C=3.0)
+    - 클래스(5개): car_horn / children_playing / engine_idling / siren / motorcycle
+      (siren<->emergency_siren, motorcycle<->motorcycle_exhaust 대응, children_playing/engine_idling은 배경음 역할)
+    - val 정확도 98.0%, test 정확도 89.5% (체크포인트에 기록된 값, model_outputs/panns_svm/README.md 참고)
+
+⚠️ 알려진 제한사항 (README.md에 상세):
+    - SVC가 probability=False로 학습되어 확률(%) 대신 decision_function 점수(마진)를 출력함
+    - 체크포인트의 semantic_thresholds(클래스별 AudioSet 게이팅 임계값)는 정확한 적용 방식(어떤 AudioSet
+      클래스 인덱스에 매핑되는지)을 재현할 학습 스크립트가 없어 이 스크립트에서는 적용하지 않음 — SVM
+      원시 예측만 사용
 """
 
 import argparse
 import time
+import urllib.request
 import warnings
 from pathlib import Path
 
 import numpy as np
 import pyaudio
 import torch
-from transformers import ASTConfig, ASTForAudioClassification, ASTFeatureExtractor
 
-warnings.filterwarnings("ignore", message="At least one mel filter")
+warnings.filterwarnings("ignore")
 
-DEFAULT_CKPT_PATH = Path(__file__).resolve().parent.parent / "model_outputs" / "outputs_ast" / "best.pt"
-SR = 16000            # ReSpeaker 네이티브 샘플레이트 & 모델 학습 샘플레이트
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+MODEL_DIR = REPO_ROOT / "03_Audio_Classification" / "model_outputs" / "panns_svm"
+DEFAULT_SVM_PATH = MODEL_DIR / "best.pt"
+DEFAULT_PANNS_CKPT_PATH = MODEL_DIR / "Cnn14_16k_mAP=0.438.pth"
+PANNS_CKPT_URL = "https://zenodo.org/record/3987831/files/Cnn14_16k_mAP%3D0.438.pth?download=1"
+PANNS_CKPT_MIN_SIZE = 3.5e8  # 정상 파일은 약 358MB, 다운로드 중단 시 훨씬 작음
+
+SR = 16000            # ReSpeaker 네이티브 샘플레이트 & PANNs Cnn14 16kHz 변형 입력 샘플레이트
 CHANNELS = 6          # 실측: ReSpeaker 4 Mic Array가 6채널로 노출됨 (0=AEC 처리 채널)
 MIC_CHANNEL_INDEX = 0 # 0번 = 보드에서 처리된(AEC) 단일 채널 -> 분류에 가장 적합
 CHUNK = 1024
@@ -40,52 +57,65 @@ def get_respeaker_index(p: pyaudio.PyAudio):
     return None
 
 
-def load_model(ckpt_path: Path):
-    if not ckpt_path.exists():
-        raise FileNotFoundError(
-            f"모델 체크포인트를 찾을 수 없습니다: {ckpt_path}\n"
-            "outputs_ast.zip을 복원해 이 경로에 두거나 --model-path로 위치를 지정하세요."
-        )
+def ensure_panns_checkpoint(ckpt_path: Path):
+    if ckpt_path.exists() and ckpt_path.stat().st_size >= PANNS_CKPT_MIN_SIZE:
+        return
+    print(f"[*] PANNs Cnn14(16kHz) 사전학습 가중치가 없어 다운로드합니다 (~340MB): {PANNS_CKPT_URL}")
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(PANNS_CKPT_URL, ckpt_path)
+
+
+def load_panns_model(ckpt_path: Path):
+    from panns_inference.models import Cnn14
+
+    model = Cnn14(sample_rate=16000, window_size=512, hop_size=160,
+                  mel_bins=64, fmin=50, fmax=8000, classes_num=527)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    class_names = ckpt["class_names"]
-    model_name = ckpt["model_name"]
-
-    config = ASTConfig.from_pretrained(model_name)
-    config.num_labels = len(class_names)
-    config.id2label = {i: c for i, c in enumerate(class_names)}
-    config.label2id = {c: i for i, c in enumerate(class_names)}
-
-    model = ASTForAudioClassification(config)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model"])
     model.eval()
-
-    feature_extractor = ASTFeatureExtractor.from_pretrained(model_name)
-    return model, feature_extractor, class_names, ckpt
+    return model
 
 
-def classify(model, feature_extractor, class_names, audio_f32: np.ndarray):
-    inputs = feature_extractor(audio_f32, sampling_rate=SR, return_tensors="pt")
+def load_svm(svm_path: Path):
+    if not svm_path.exists():
+        raise FileNotFoundError(
+            f"SVM 체크포인트를 찾을 수 없습니다: {svm_path}\n"
+            "03_Audio_Classification/model_outputs/panns_svm/README.md 참고해 복원하거나 --svm-path로 위치를 지정하세요."
+        )
+    ckpt = torch.load(svm_path, map_location="cpu", weights_only=False)
+    return ckpt["classifier"], ckpt["classes"], ckpt
+
+
+def classify(panns_model, clf, class_names, audio_f32: np.ndarray):
+    audio_t = torch.from_numpy(audio_f32).unsqueeze(0)
     with torch.no_grad():
-        logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)[0]
-    order = torch.argsort(probs, descending=True)
-    return [(class_names[i], probs[i].item()) for i in order]
+        embedding = panns_model(audio_t)["embedding"].numpy()
+    scores = clf.decision_function(embedding)[0]
+    order = np.argsort(scores)[::-1]
+    return [(class_names[i], float(scores[i])) for i in order]
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=float, default=1.0,
-                        help="분류 1회당 사용하는 오디오 길이 (초). 학습 시 사용한 길이(4.0s)와 맞추는 것을 권장")
+                        help="분류 1회당 사용하는 오디오 길이 (초)")
     parser.add_argument("--interval", type=float, default=2.0,
                         help="분류 반복 주기 (초)")
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_CKPT_PATH,
-                        help="AST 체크포인트(best.pt) 경로")
+    parser.add_argument("--svm-path", type=Path, default=DEFAULT_SVM_PATH,
+                        help="PANNs 임베딩 위 SVM 체크포인트(best.pt) 경로")
+    parser.add_argument("--panns-checkpoint", type=Path, default=DEFAULT_PANNS_CKPT_PATH,
+                        help="PANNs Cnn14(16kHz) 사전학습 가중치 경로 (없으면 자동 다운로드 시도)")
     args = parser.parse_args()
 
+    print("[*] PANNs Cnn14 가중치 확인 중...")
+    ensure_panns_checkpoint(args.panns_checkpoint)
+
     print("[*] 모델 로딩 중...")
-    model, feature_extractor, class_names, ckpt = load_model(args.model_path)
-    print(f"[*] 모델 로드 완료: {ckpt['model_name']}  (검증 정확도 {ckpt['best_acc']*100:.1f}%)")
+    panns_model = load_panns_model(args.panns_checkpoint)
+    clf, class_names, ckpt = load_svm(args.svm_path)
+    print(f"[*] 모델 로드 완료 (SVM val_accuracy={ckpt.get('val_accuracy', float('nan'))*100:.1f}%, "
+          f"test_accuracy={ckpt.get('test_accuracy', float('nan'))*100:.1f}%)")
     print(f"[*] 클래스: {class_names}")
 
     p = pyaudio.PyAudio()
@@ -120,15 +150,14 @@ def main():
             mono = np.concatenate(frames)[:n_samples].astype(np.float32) / 32768.0
 
             t_infer_start = time.time()
-            results = classify(model, feature_extractor, class_names, mono)
+            results = classify(panns_model, clf, class_names, mono)
             infer_sec = time.time() - t_infer_start
 
-            top_label, top_conf = results[0]
+            top_label, top_score = results[0]
             print(f"[{time.strftime('%H:%M:%S')}] 녹음 {capture_sec:.2f}s / 추론 {infer_sec:.2f}s")
-            for label, conf in results[:args.topk]:
-                bar = "#" * int(conf * 30)
+            for label, score in results[:args.topk]:
                 marker = ">>" if label == top_label else "  "
-                print(f"  {marker} {label:20s} {conf*100:5.1f}% {bar}")
+                print(f"  {marker} {label:20s} score={score:+.3f}")
             print()
 
             elapsed = time.time() - t_capture_start

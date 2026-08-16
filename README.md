@@ -17,7 +17,7 @@
 ```
 [Jetson Orin Nano]                              [노트북 (ASUS TUF A16, Ubuntu, ROS2)]
   ReSpeaker 4 Mic Array v2.0                        카메라 4대 (전/후/좌/우 90°)
-  → 소리 분류 (AST, 5클래스)                          LiDAR VLP-16
+  → 소리 분류 (PANNs Cnn14 임베딩+SVM, 5클래스)        LiDAR VLP-16
   → 방향(DoA) 추정                                    ↓
   ROS 미사용, 소켓/JSON으로 전송 ──이더넷 직결──▶     ROS2 브릿지 노드가 수신 → 토픽 발행
                                                      → YOLO 경광등 검출 + LiDAR 거리매칭
@@ -51,10 +51,10 @@
 │
 ├── 03_Audio_Classification/
 │   ├── 전처리_파이프라인.md      ← 오디오 전처리, 실시간 스트리밍
-│   ├── 모델_아키텍처.md          ← AST(Audio Spectrogram Transformer), 5클래스 분류
+│   ├── 모델_아키텍처.md          ← PANNs Cnn14 임베딩 + SVM, 5클래스 분류
 │   ├── 실시간_추론_데모.md       ← 실시간 추론 파이프라인 검증 기록
-│   ├── model_outputs/            ← 학습 결과(정확도, 로그) — 가중치(.pt)는 용량 문제로 미포함
-│   └── code/realtime_classify.py 등 ← ReSpeaker 캡처 → AST 추론 실행 코드
+│   ├── model_outputs/            ← 학습 결과(정확도, 로그) — 가중치(.pt/.pth)는 용량 문제로 미포함
+│   └── code/realtime_classify.py 등 ← ReSpeaker 캡처 → PANNs 임베딩 → SVM 추론 실행 코드
 │
 ├── 04_Sound_Localization/
 │   ├── TDoA_원리.md              ← 기하학적 원리, 음속 보정
@@ -81,7 +81,7 @@
 1. `00_Overview/현재_상태_요약.md` — 현재 확정 사항 파악
 2. `01_Hardware/ReSpeaker_설정.md`, `Jetson_Orin_Nano_환경.md` — Jetson 개발 환경 구성
 3. `02_Data_Collection/데이터셋_수집_계획.md` — 학습 데이터 준비
-4. `03_Audio_Classification/모델_아키텍처.md` — AST 모델 구조·학습
+4. `03_Audio_Classification/모델_아키텍처.md` — PANNs Cnn14+SVM 모델 구조·학습
 5. `04_Sound_Localization/GCC_PHAT_구현.md` — 방향 추정 구현
 6. `01_Hardware/카메라_디스플레이_연결.md` — 카메라 4대 + LiDAR 노트북 측 구성
 7. `06_Display_Integration/ui_state_spec.md`, `bev_mockup.html` — BEV UI 사양·목업
