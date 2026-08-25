@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9/8 영상 데모 · 카메라 주화면 UI 시안</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<style>
+  :root{--page:#08080A;--panel:#131316;--edge:#232327;--txt:#F5F5F5;--dim:#7A7A82;
+        --teal:#00C2C7;--yel:#FFD400;--red:#FF3B30;--gray:#3A3E48}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--page);color:var(--txt);
+    font-family:Pretendard,-apple-system,'Malgun Gothic',sans-serif;padding:26px}
+  .wrap{max-width:1520px;margin:0 auto}
+  header{margin-bottom:20px}
+  h1{font-size:19px;font-weight:600;letter-spacing:-.02em}
+  .sub{font-size:13px;color:var(--dim);margin-top:6px;line-height:1.6}
+  .grid{display:grid;grid-template-columns:246px 1fr;gap:20px;align-items:start}
+  @media(max-width:920px){.grid{grid-template-columns:1fr}}
+  nav{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:8px}
+  .glabel{font-size:10.5px;color:var(--dim);padding:12px 10px 5px;letter-spacing:.08em}
+  button.sc{display:flex;gap:9px;width:100%;text-align:left;background:transparent;border:0;
+    color:#C9C9D0;font-family:inherit;font-size:13.5px;padding:9px 10px;border-radius:7px;
+    cursor:pointer;transition:background .12s,color .12s}
+  button.sc:hover{background:#1B1B1F;color:var(--txt)}
+  button.sc[aria-pressed="true"]{background:var(--teal);color:#00201F;font-weight:600}
+  button.sc:focus-visible{outline:2px solid var(--teal);outline-offset:-2px}
+  .num{color:#55555E;font-variant-numeric:tabular-nums;flex:none}
+  button.sc[aria-pressed="true"] .num{color:#00403E}
+  .stage{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:14px}
+  svg.screen{width:100%;aspect-ratio:16/9;border-radius:8px;display:block;background:#0B0B0B}
+  #glow,#hud,#camlabel,#detbox,#campicker{transition:opacity .18s ease}
+  .spec{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:14px}
+  @media(max-width:740px){.spec{grid-template-columns:repeat(2,1fr)}}
+  .cell{background:#0E0E11;border:1px solid var(--edge);border-radius:8px;padding:11px 12px}
+  .ck{font-size:10.5px;color:var(--dim);letter-spacing:.05em}
+  .cv{font-size:14px;margin-top:6px;display:flex;align-items:center;gap:7px}
+  .sw{width:11px;height:11px;border-radius:3px;flex:none}
+  .note{margin-top:10px;font-size:12.5px;color:#9C9CA4;line-height:1.7;
+    background:#0E0E11;border:1px solid var(--edge);border-radius:8px;padding:13px 15px}
+  .note b{color:var(--txt);font-weight:600}
+  @media(prefers-reduced-motion:reduce){#glow,#hud,#camlabel,#detbox,#campicker{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>9/8 영상 데모 · 카메라 주화면 UI 시안</h1>
+    <p class="sub">카메라 영상이 주화면, BEV 지도는 이번 데모(라이다 없음)에서 제외 — 방향 정보는 상단 알림 배너로만 전달합니다.<br>
+    거리를 모르니 <b>모든 감지는 "주의" 단계까지만</b> 표시합니다 (위험도를 확정 지을 근거가 없는 상태에서 "경고"·빨간색을 쓰면 없는 정확도를 있는 척하는 것이 됩니다).</p>
+  </header>
+
+  <div class="grid">
+    <nav id="nav" aria-label="시나리오"></nav>
+    <div class="stage">
+      <svg class="screen" id="scr" viewBox="0 0 1920 1080" role="img" aria-labelledby="st">
+        <title id="st">9/8 데모 카메라 주화면</title>
+        <defs>
+          <filter id="gl" x="-70%" y="-70%" width="240%" height="240%">
+            <feGaussianBlur stdDeviation="40"/></filter>
+          <linearGradient id="camgrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#1C2028"/><stop offset="1" stop-color="#0A0B0D"/>
+          </linearGradient>
+        </defs>
+        <g id="glow"></g>
+        <rect width="1920" height="1080" fill="url(#camgrad)"/>
+        <g id="camplaceholder"></g>
+        <g id="detbox"></g>
+        <g id="campicker"></g>
+        <g id="camlabel"></g>
+        <g id="hud"></g>
+      </svg>
+      <div class="spec" id="spec"></div>
+      <p class="note" id="note"></p>
+    </div>
+  </div>
+</div>
+
+<script>
+const C={teal:"#00C2C7",yel:"#FFD400",red:"#FF3B30",gray:"#3A3E48",txt:"#F5F5F5",dim:"#7A7A82",violet:"#B98CFF"};
+const KIND_COLOR={horn:C.teal,siren:C.red,moto:C.violet}; // 소리 종류를 구분하는 고정 색(심각도와 분리)
+const LEVEL_COLOR=C.yel; // 이번 데모는 전부 "주의" 단계 — 테두리 빛·레벨 텍스트는 항상 이 색
+const NS="http://www.w3.org/2000/svg", F="Pretendard";
+const el=(t,a,x)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);
+  if(x!=null)e.textContent=x;return e;};
+const $=i=>document.getElementById(i);
+
+/* ── 종류 글리프 (bev_mockup.html과 동일 스타일) ── */
+function glyph(kind,col,sw){
+  const g=el("g",{}), W=sw||7;
+  const S={fill:"none",stroke:col,"stroke-width":W,"stroke-linecap":"round","stroke-linejoin":"round"};
+  if(kind==="horn"){
+    g.appendChild(el("path",{...S,d:"M-34 -16 L-34 16 L-16 24 L-16 -24 Z",fill:col,stroke:"none"}));
+    [16,30,44].forEach((R,i)=>g.appendChild(el("path",{...S,"stroke-width":W-i*0.6,
+      d:`M-6 ${-R*0.72} A ${R} ${R} 0 0 1 -6 ${R*0.72}`})));
+  }else if(kind==="siren"){
+    g.appendChild(el("path",{...S,d:"M-24 10 A 24 24 0 0 1 24 10",fill:col,stroke:"none"}));
+    g.appendChild(el("rect",{x:-32,y:10,width:64,height:13,rx:5,fill:col}));
+    g.appendChild(el("path",{...S,d:"M-40 -22 L-30 -12"}));
+    g.appendChild(el("path",{...S,d:"M40 -22 L30 -12"}));
+    g.appendChild(el("path",{...S,d:"M0 -42 L0 -30"}));
+  }else if(kind==="moto"){
+    g.appendChild(el("circle",{...S,cx:-28,cy:16,r:15}));
+    g.appendChild(el("circle",{...S,cx:28,cy:16,r:15}));
+    g.appendChild(el("path",{...S,d:"M-28 16 L-10 -10 L14 -10 L28 16"}));
+    g.appendChild(el("path",{...S,d:"M-10 -10 L-24 -24"}));
+  }
+  return g;
+}
+const place=(kind,col,cx,cy,scale,sw)=>{
+  const w=el("g",{transform:`translate(${cx} ${cy}) scale(${scale})`});
+  w.appendChild(glyph(kind,col,sw)); return w;
+};
+
+const CAM_LABEL={left:"좌측 카메라",right:"우측 카메라",rear:"후방 카메라(기본)"};
+const CAM_ORDER=["left","rear","right"]; // 화면 표시 순서(차량 배치 그대로)
+
+/* ── 시나리오 ── */
+const S=[
+{n:"평상시",cam:"rear",k:null,
+ note:"소리가 없으면 후방 카메라를 상시 표시합니다 — 별도 알림 배너 없이 조용한 화면."},
+
+{n:"경적 → 우측",cam:"right",k:"horn",g:"경적",lv:"주의",loc:"우측",
+ note:"경적은 Detection(구급차/오토바이 인식) 대상이 아니라 카메라만 전환합니다. 거리를 모르므로 방향만 안내."},
+
+{n:"사이렌 → 좌측",cam:"left",k:"siren",g:"사이렌",lv:"주의",loc:"좌측",
+ det:{label:"Ambulance",conf:.92},
+ note:"사이렌·오토바이(배기음)만 Detection을 추가로 돌려 화면에 박스로 표시합니다 — 팀원이 학습한 YOLO 모델(yolo26m_v4_cls05) 결과."},
+
+{n:"오토바이 → 우측",cam:"right",k:"moto",g:"오토바이",lv:"주의",loc:"우측",
+ det:{label:"Motorcycle",conf:.87},
+ note:"방향 전환 + Detection까지 동일한 흐름. 거리를 모르니 '근접/경고' 단계로는 올리지 않습니다."},
+
+{n:"오토바이 · 골목(시야 밖)",cam:"left",k:"moto",g:"오토바이",lv:"주의",loc:"좌측 골목",oos:1,
+ note:"벽에 가려 카메라에 아직 안 보이는 상태 — Detection 박스 없이 '시야 밖' 텍스트만. 소리로 먼저 알아채는 게 이 기능의 핵심이라, 안 보여도 방향(카메라 전환)까지는 그대로 합니다."},
+
+{n:"전방 감지 (카메라 없음)",cam:null,k:"siren",g:"사이렌",lv:"주의",loc:"전방",
+ note:"9/8 데모는 전방 카메라가 없습니다. 경적·사이렌·오토바이 무엇이든 전방에서 감지되면 동일하게 카메라 전환 대신 화면 중앙에 '전방 확인' 텍스트로만 안내 — 10월 4대 구성에서는 전방 카메라로 대체됩니다."}
+];
+
+function draw(i){
+  const s=S[i], kc=s.k?KIND_COLOR[s.k]:null, G=$("glow"), H=$("hud"), CP=$("camplaceholder"),
+        DB=$("detbox"), CL=$("camlabel"), PK=$("campicker");
+  [G,H,CP,DB,CL,PK].forEach(n=>n.replaceChildren());
+
+  /* 카메라 placeholder (실제 촬영에서는 이 영역이 실제 영상) */
+  CP.appendChild(el("text",{x:960,y:540,fill:"#2A2E36","font-size":40,"font-family":F,
+    "text-anchor":"middle"},"[ 카메라 영상 영역 ]"));
+  CP.appendChild(el("line",{x1:0,y1:1080,x2:760,y2:640,stroke:"#1A1D22","stroke-width":3}));
+  CP.appendChild(el("line",{x1:1920,y1:1080,x2:1160,y2:640,stroke:"#1A1D22","stroke-width":3}));
+
+  /* 테두리 빛 (위험 단계 → 강도. 항상 "주의" 단계라 색은 고정, 종류색과는 분리) */
+  if(s.lv){
+    G.appendChild(el("rect",{x:-60,y:-60,width:2040,height:1200,fill:"none",stroke:LEVEL_COLOR,
+      "stroke-width":80,opacity:.45,filter:"url(#gl)"}));
+  }
+
+  /* 현재 카메라 표시 (좌/후/우 인디케이터, 지도 아님 — 상태만) */
+  CAM_ORDER.forEach((c,idx)=>{
+    const x=1700+idx*70, active=c===s.cam;
+    PK.appendChild(el("rect",{x:x-26,y:990,width:52,height:52,rx:10,
+      fill:active?(kc||C.teal):"#1C1E24",stroke:"#2B2F38","stroke-width":1}));
+    PK.appendChild(el("text",{x,y:1021,fill:active?"#0B0B0B":"#5A5F6A","font-size":20,
+      "font-weight":600,"font-family":F,"text-anchor":"middle"},
+      {left:"좌",right:"우",rear:"후"}[c]));
+  });
+
+  /* 카메라 라벨 (좌하단) */
+  CL.appendChild(el("text",{x:40,y:1044,fill:"#565C68","font-size":24,"font-family":F},
+    s.cam?CAM_LABEL[s.cam]:"카메라 전환 없음 (전방 감지)"));
+
+  /* Detection 박스 (종류색으로 통일 — 상단 배너 아이콘과 같은 색이라 한눈에 연결됨) */
+  if(s.det){
+    DB.appendChild(el("rect",{x:980,y:360,width:520,height:340,rx:6,fill:"none",
+      stroke:kc,"stroke-width":4,"stroke-dasharray":"2 0"}));
+    DB.appendChild(el("rect",{x:980,y:322,width:300,height:44,rx:6,fill:kc}));
+    DB.appendChild(el("text",{x:1000,y:353,fill:"#0B0B0B","font-size":24,"font-weight":600,
+      "font-family":F},`${s.det.label} ${Math.round(s.det.conf*100)}%`));
+  }
+  if(s.oos){
+    CP.appendChild(el("text",{x:960,y:610,fill:kc,"font-size":44,"font-weight":700,
+      "font-family":F,"text-anchor":"middle"},"시야 밖 — 소리로만 감지됨"));
+  }
+
+  /* 상단 알림 배너 (아이콘 확대 + 종류별 고정 색) */
+  if(s.k){
+    H.appendChild(el("rect",{x:56,y:56,width:150,height:150,rx:30,fill:kc}));
+    H.appendChild(place(s.k,"#0B0B0B",131,131,1.06,11));
+    H.appendChild(el("text",{x:238,y:132,fill:C.txt,"font-size":58,"font-weight":600,
+      "font-family":F},s.g));
+    H.appendChild(el("text",{x:238,y:180,fill:LEVEL_COLOR,"font-size":28,"font-weight":600,
+      "font-family":F},s.lv));
+    H.appendChild(el("text",{x:238,y:180,fill:C.dim,"font-size":28,"font-family":F,
+      dx:s.lv.length*29+14},"→ "+s.loc));
+  }
+  if(!s.cam && s.k){
+    H.appendChild(el("rect",{x:660,y:440,width:600,height:200,rx:18,fill:"#000",opacity:.6,
+      stroke:kc,"stroke-width":3}));
+    H.appendChild(el("text",{x:960,y:568,fill:C.txt,"font-size":72,"font-weight":700,
+      "font-family":F,"text-anchor":"middle"},"전방 확인"));
+  }
+
+  info(i);
+}
+
+function info(i){
+  const s=S[i], kc=s.k?KIND_COLOR[s.k]:null;
+  $("spec").innerHTML=[
+    ["소리",s.g||"없음",kc],
+    ["위험 단계",s.lv||"—",s.lv?LEVEL_COLOR:null],
+    ["카메라",s.cam?CAM_LABEL[s.cam]:(s.k?"전환 없음(전방)":"후방 기본"),null],
+    ["Detection",s.det?`${s.det.label} ${Math.round(s.det.conf*100)}%`:"미실행",null]
+  ].map(([k,v,c])=>
+    `<div class="cell"><div class="ck">${k}</div><div class="cv">${
+      c?`<span class="sw" style="background:${c}"></span>`:""}${v}</div></div>`).join("");
+  $("note").innerHTML=s.note;
+}
+
+const nav=$("nav");
+[["기본",[0]],["방향 전환",[1,2,3]],["예외",[4,5]]].forEach(([g,idx])=>{
+  const h=document.createElement("div"); h.className="glabel"; h.textContent=g; nav.appendChild(h);
+  idx.forEach(i=>{
+    const b=document.createElement("button");
+    b.className="sc"; b.type="button"; b.dataset.i=i;
+    b.setAttribute("aria-pressed",i===0);
+    b.innerHTML=`<span class="num">${String(i+1).padStart(2,"0")}</span><span>${S[i].n}</span>`;
+    nav.appendChild(b);
+  });
+});
+nav.addEventListener("click",e=>{
+  const b=e.target.closest("button.sc"); if(!b)return;
+  nav.querySelectorAll("button.sc").forEach(x=>x.setAttribute("aria-pressed",x===b));
+  draw(+b.dataset.i);
+});
+draw(0);
+</script>
+</body>
+</html>

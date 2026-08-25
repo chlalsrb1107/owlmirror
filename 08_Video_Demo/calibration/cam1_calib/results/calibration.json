@@ -1,0 +1,103 @@
+{
+  "model": "MER2-240-159U3C",
+  "image_size": [
+    2048,
+    1200
+  ],
+  "camera_matrix": [
+    [
+      2075.469437230367,
+      0.0,
+      1033.6445595842856
+    ],
+    [
+      0.0,
+      2074.546145461253,
+      596.4076113597894
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coefficients": [
+    -0.02207085947540371,
+    0.09960508653112364,
+    -0.0006806447233312794,
+    0.0012664636467059937,
+    0.20306473685503787
+  ],
+  "distortion_model": "plumb_bob (k1,k2,p1,p2,k3)",
+  "rms_reprojection_error_px": 0.3487626632454472,
+  "per_view_error_px": {
+    "calib_002.png": 0.15896035730838776,
+    "calib_003.png": 0.7948476672172546,
+    "calib_006.png": 0.1375306099653244,
+    "calib_007.png": 0.1322939693927765,
+    "calib_008.png": 0.1449812650680542,
+    "calib_009.png": 0.14154629409313202,
+    "calib_010.png": 0.15717174112796783,
+    "calib_011.png": 0.16711266338825226,
+    "calib_012.png": 0.20674380660057068,
+    "calib_013.png": 0.19043317437171936,
+    "calib_014.png": 0.18084847927093506,
+    "calib_015.png": 0.7476014494895935,
+    "calib_016.png": 0.1441039890050888,
+    "calib_018.png": 0.16506125032901764,
+    "calib_019.png": 0.17442499101161957,
+    "calib_020.png": 0.9217324256896973,
+    "calib_022.png": 0.24086812138557434,
+    "calib_025.png": 0.17377077043056488,
+    "calib_026.png": 0.1709987074136734,
+    "calib_027.png": 0.15942278504371643,
+    "calib_030.png": 0.16023023426532745
+  },
+  "views_used": [
+    "calib_002.png",
+    "calib_003.png",
+    "calib_006.png",
+    "calib_007.png",
+    "calib_008.png",
+    "calib_009.png",
+    "calib_010.png",
+    "calib_011.png",
+    "calib_012.png",
+    "calib_013.png",
+    "calib_014.png",
+    "calib_015.png",
+    "calib_016.png",
+    "calib_018.png",
+    "calib_019.png",
+    "calib_020.png",
+    "calib_022.png",
+    "calib_025.png",
+    "calib_026.png",
+    "calib_027.png",
+    "calib_030.png"
+  ],
+  "views_dropped": [
+    "calib_001.png",
+    "calib_004.png",
+    "calib_005.png",
+    "calib_017.png",
+    "calib_021.png",
+    "calib_023.png",
+    "calib_024.png",
+    "calib_028.png",
+    "calib_029.png",
+    "calib_031.png"
+  ],
+  "views_failed": [],
+  "board": {
+    "cols": 9,
+    "rows": 8,
+    "square_size_mm": 123.0
+  },
+  "derived": {
+    "fx_mm": 7.160369558444767,
+    "fov_x_deg": 52.52183699099278,
+    "fov_y_deg": 32.26184122499019,
+    "pixel_size_um": 3.45
+  }
+}
