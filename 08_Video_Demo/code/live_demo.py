@@ -56,6 +56,10 @@ LOC_LABEL_KO = {"left": "좌측", "right": "우측", "rear": "후방"}
 KIND_COLOR_BGR = {"car_horn": (199, 194, 0), "siren": (48, 59, 255), "motorcycle": (255, 140, 185)}
 LEVEL_LABEL = "주의"
 HOLD_SEC = 3.0  # 마지막 감지 이후 배너/카메라 전환을 유지하는 시간 (ui_state_spec.md "3초 유지" 원칙)
+# 숫자가 작을수록 우선순위 높음 — 팀 논의 결과 "응급차량 양보 의무" 기준으로 사이렌 최우선
+# (ui_state_spec.md §2 최종 표는 "나에게 닥친 충돌 위험" 기준으로 경적을 더 위에 뒀으나, 9/8
+# 데모는 이 기준으로 감. §2 표도 팀 재논의 후 맞출지 결정 필요)
+PRIORITY = {"siren": 1, "car_horn": 2, "motorcycle": 3}
 
 FONT_PATH = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"  # TODO: 실제 노트북 폰트 경로 확인
 _font_cache = {}
@@ -154,33 +158,43 @@ def run_detection(detector, camera: str):
 
 
 class SharedState:
-    """오디오 스레드 <-> 영상 스레드 사이에서 공유하는 표시 상태. 락으로 보호."""
+    """오디오 스레드 <-> 영상 스레드 사이에서 공유하는 표시 상태. 락으로 보호.
+
+    동시에 여러 종류의 소리가 감지될 수 있으므로, 클래스별로 "현재 유효한 감지"를 각자의
+    hold 시각과 함께 self.active에 들고 있는다. 화면에 그릴 때(snapshot)만 그중 우선순위
+    1위를 메인 카메라/배너로, 나머지는 작은 아이콘+방향으로 뽑아낸다 — ui_state_spec.md
+    §2 "지도는 전부, 알림은 하나" 원칙을 지도 없는 이 데모에서 아이콘으로 구현한 것.
+    """
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.camera = "rear"
-        self.banner = None      # {"class_name","loc"} or None
-        self.detection = None   # {"label","conf"} or None
-        self.hold_until = 0.0   # 이 시각까지는 camera/banner/detection 유지
-        self.front_until = 0.0  # 이 시각까지는 "전방 확인" 오버레이 표시
+        # class_name -> {"camera": str|None, "loc": str, "detection": dict|None, "until": float}
+        self.active = {}
 
     def trigger(self, camera, class_name: str, loc: str, detection):
         now = time.time()
         with self.lock:
-            if camera is None:  # 전방 — 카메라는 그대로 두고 안내 오버레이만
-                self.front_until = now + HOLD_SEC
-            else:
-                self.camera = camera
-                self.banner = {"class_name": class_name, "loc": loc}
-                self.detection = detection
-                self.hold_until = now + HOLD_SEC
+            self.active[class_name] = {
+                "camera": camera, "loc": loc, "detection": detection, "until": now + HOLD_SEC,
+            }
 
     def snapshot(self):
         now = time.time()
         with self.lock:
-            if self.banner is not None and now > self.hold_until:
-                self.camera, self.banner, self.detection = "rear", None, None
-            return self.camera, self.banner, self.detection, now < self.front_until
+            for name in [n for n, v in self.active.items() if now > v["until"]]:
+                del self.active[name]
+
+            if not self.active:
+                return "rear", None, None, False, []
+
+            top_name = min(self.active, key=lambda n: PRIORITY[n])
+            top = self.active[top_name]
+            secondary = [{"class_name": n, "loc": v["loc"]}
+                         for n, v in self.active.items() if n != top_name]
+
+            if top["camera"] is None:  # 전방 — 담당 카메라 없어 안내 오버레이만
+                return "rear", None, None, True, secondary
+            return top["camera"], {"class_name": top_name, "loc": top["loc"]}, top["detection"], False, secondary
 
 
 def audio_worker(state: SharedState, panns_model, svm, class_names, tuning, detector, stream):
@@ -233,11 +247,27 @@ def put_text_kr(frame_bgr, text: str, org, size: int, color_bgr):
     frame_bgr[:] = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
-def draw_overlay(frame_bgr, camera: str, banner, detection, show_front: bool):
+def draw_secondary_icons(frame_bgr, secondary):
+    """메인 배너를 차지하지 못한(우선순위가 낮은) 동시 감지들을 우측 상단에 작은 아이콘+방향으로 표시."""
+    import cv2
+
+    w = frame_bgr.shape[1]
+    y = 24
+    for item in secondary:
+        col = KIND_COLOR_BGR[item["class_name"]]
+        cx, cy = w - 46, y + 20
+        cv2.circle(frame_bgr, (cx, cy), 18, col, -1)
+        label = f"{CLASS_LABEL_KO[item['class_name']]} · {item['loc']}"
+        put_text_kr(frame_bgr, label, (w - 300, y + 6), 22, (230, 230, 230))
+        y += 46
+
+
+def draw_overlay(frame_bgr, camera: str, banner, detection, show_front: bool, secondary):
     import cv2
 
     h, w = frame_bgr.shape[:2]
     put_text_kr(frame_bgr, CAMERA_LABEL_KO[camera], (24, h - 48), 26, (200, 200, 200))
+    draw_secondary_icons(frame_bgr, secondary)
 
     if banner is not None:
         col = KIND_COLOR_BGR[banner["class_name"]]
@@ -265,14 +295,14 @@ def video_loop(state: SharedState):
 
     print("[*] 화면 표시 시작 — 창에서 q 누르면 종료")
     while True:
-        camera, banner, detection, show_front = state.snapshot()
+        camera, banner, detection, show_front, secondary = state.snapshot()
         frame = read_camera_frame(camera)
         if frame is None:
             time.sleep(0.05)
             continue
 
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        draw_overlay(frame_bgr, camera, banner, detection, show_front)
+        draw_overlay(frame_bgr, camera, banner, detection, show_front, secondary)
         cv2.imshow("올빼미러 - 9/8 데모", frame_bgr)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
