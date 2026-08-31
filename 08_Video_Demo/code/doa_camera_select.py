@@ -1,14 +1,16 @@
 """
 doa_camera_select.py — ReSpeaker 4 Mic Array v2.0 온보드(펌웨어) DoA를 읽어
-9/8 영상 제출용 3카메라(좌/우/후방) 데모의 방향→카메라 매핑을 계산한다.
+9/8 영상 제출용 4카메라(전/좌/후/우) 데모의 방향→카메라 매핑을 계산한다.
 
-배경: 00_Overview/2026-08-25_9.8_영상제출_촬영_계획.md
-최종 구현(카메라 4대+LiDAR, 05_Camera_Tracking/DoA_카메라_매핑.md의 select_camera)과 달리,
-이 데모는 방향추정을 04_Sound_Localization/code/gcc_phat.py(자체 구현, 미보정)가 아니라
-ReSpeaker 펌웨어 온보드 DoA(USB Tuning 인터페이스)로 대체한다.
+배경: 00_Overview/2026-08-25_9.8_영상제출_촬영_계획.md (2026-08-31 갱신)
+카메라 4대+LiDAR가 촬영일까지 장착·데이터 수신 가능해져, 8/25에 정했던 "카메라 3대(좌/우/후방)만
+쓰는 축소 구성"을 되돌리고 최종 구현(05_Camera_Tracking/DoA_카메라_매핑.md의 select_camera)과
+동일한 4카메라 매핑을 그대로 쓴다. 단, 방향추정 자체는 여전히
+04_Sound_Localization/code/gcc_phat.py(자체 구현, 미보정)가 아니라
+ReSpeaker 펌웨어 온보드 DoA(USB Tuning 인터페이스)를 쓴다 — 이 부분은 8/25 결정 유지.
 
-좌표계: 차량 전방(북)=0°, 반시계 +. 동=우측 카메라, 서=좌측 카메라, 남=후방 카메라(기본 표시).
-북(전방)은 담당 카메라가 없어 "전방 확인" 텍스트로 대체한다.
+좌표계: 차량 전방(북)=0°, 반시계 +. 동=우측 카메라, 서=좌측 카메라, 남=후방 카메라(기본 표시),
+북=전방 카메라.
 
 하드웨어 요구:
     pip install pyusb
@@ -36,12 +38,12 @@ CTRL_TIMEOUT_MS = 100000
 # 차량 정면(0°)에 해당하는지 오프셋으로 보정한다. --live로 정면에서 소리를 내며 확인할 것.
 MOUNT_OFFSET_DEG = 0.0
 
-# 동/서/남 90°씩 + 북(전방, 카메라 없음) 90°
+# 동/서/남/북 90°씩 — 05_Camera_Tracking/DoA_카메라_매핑.md의 최종 4카메라 매핑과 동일
 CAMERA_RANGES = {
-    "front_no_camera": (-45, 45),   # 북
-    "left": (45, 135),              # 서
-    "rear": (135, 225),             # 남 (기본 표시)
-    "right": (-135, -45),           # 동
+    "front": (-45, 45),    # 북
+    "left": (45, 135),     # 서
+    "rear": (135, 225),    # 남 (기본 표시)
+    "right": (-135, -45),  # 동
 }
 
 
@@ -76,7 +78,7 @@ def find_device():
 
 
 def select_camera(doa_deg: float, mount_offset_deg: float = MOUNT_OFFSET_DEG) -> str:
-    """DoA 각도(0~359)를 받아 담당 카메라("left"/"right"/"rear") 또는 "front_no_camera"를 반환."""
+    """DoA 각도(0~359)를 받아 담당 카메라("front"/"left"/"rear"/"right")를 반환."""
     rel = (doa_deg - mount_offset_deg + 180) % 360 - 180  # -180~180 정규화
     for name, (lo, hi) in CAMERA_RANGES.items():
         if lo <= rel < hi:
@@ -85,7 +87,7 @@ def select_camera(doa_deg: float, mount_offset_deg: float = MOUNT_OFFSET_DEG) ->
 
 
 def run_selftest():
-    cases = [(0, "front_no_camera"), (90, "left"), (180, "rear"), (270, "right"), (-90, "right"), (44, "front_no_camera"), (46, "left")]
+    cases = [(0, "front"), (90, "left"), (180, "rear"), (270, "right"), (-90, "right"), (44, "front"), (46, "left")]
     all_ok = True
     for deg, expected in cases:
         got = select_camera(deg)
