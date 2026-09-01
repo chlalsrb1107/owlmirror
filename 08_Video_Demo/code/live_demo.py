@@ -449,8 +449,32 @@ def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection
     return policy.motorcycle_level(match, detection is not None, rms_db)
 
 
+def monitor_geometry(name: str):
+    """xrandr에서 해당 모니터의 (x, y, width, height)를 찾는다. 못 찾으면 None.
+
+    확장 배치에서는 각 모니터가 가상 화면의 다른 좌표를 차지한다(예: 노트북 +0+0,
+    외장 +1920+0). 전체화면은 **창이 올라가 있는 모니터**를 기준으로 잡히므로,
+    먼저 창을 그 좌표로 옮긴 다음 전체화면을 켜야 원하는 화면에 뜬다.
+    """
+    import re
+    import subprocess
+
+    try:
+        out = subprocess.run(["xrandr", "--listmonitors"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:  # noqa: BLE001 — xrandr가 없거나 X가 아니면 그냥 포기
+        return None
+    for line in out.splitlines():
+        if name in line:
+            m = re.search(r"(\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)", line)
+            if m:
+                w, h, x, y = (int(m.group(i)) for i in (1, 2, 3, 4))
+                return x, y, w, h
+    return None
+
+
 def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None,
-               snapshot_dir=None, frames=0):
+               snapshot_dir=None, frames=0, fullscreen=False, monitor=None):
     """메인 스레드 표시 루프 — 왼쪽 BEV | 오른쪽 카메라 반반 화면을 매 프레임 합성한다.
 
     (2026-09-02) camera_ui_mockup.html의 반반 레이아웃을 실제 화면으로 구현. 이전에는 카메라
@@ -469,10 +493,31 @@ def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None,
     else:
         # 창을 명시적으로 만들고 크기를 지정한다. 안 하면 OpenCV/Qt가 744x332 같은 엉뚱한
         # 크기로 띄워서, 다른 창 뒤에 묻히면 사용자는 "아무것도 안 뜬다"고 느끼게 된다.
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW_NAME, bev_render.CANVAS_W, bev_render.CANVAS_H)
-        print(f"[*] 화면 표시 시작 — '{WINDOW_NAME}' 창에서 q 누르면 종료")
-        print("[*] 창이 안 보이면 다른 창에 가려진 것입니다 (Alt+Tab으로 전환)")
+        # ⚠️ WINDOW_GUI_NORMAL을 반드시 붙인다. OpenCV의 Qt 백엔드는 기본이
+        #    WINDOW_GUI_EXPANDED라 툴바와 상태바를 얹는데, 밝은 색이라 차량 화면에서
+        #    위아래 흰 띠로 보인다(2026-09-02 실물에서 확인).
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_NORMAL)
+        if monitor:
+            geo = monitor_geometry(monitor)
+            if geo is None:
+                print(f"[!] 모니터 '{monitor}'를 찾지 못했습니다 — 현재 화면에 표시합니다.")
+                print("    사용 가능한 이름은 `xrandr --listmonitors`로 확인하세요.")
+            else:
+                x, y, w, h = geo
+                # 표시 해상도 그대로 그린다 — 확대/축소가 없어야 여백도 흐림도 없다.
+                bev_render.configure_canvas(w, h)
+                cv2.moveWindow(WINDOW_NAME, x, y)
+                cv2.waitKey(1)  # 창 이동이 반영된 뒤에 전체화면을 켜야 한다
+                print(f"[*] {monitor} 모니터({x},{y}) {w}x{h}로 창 이동 · 캔버스도 동일 해상도")
+        if fullscreen:
+            # 차량 디스플레이용 — 제목표시줄·작업표시줄 없이 화면을 꽉 채운다.
+            # 캔버스가 16:9(1600x900)라 1920x1080 화면에서는 여백 없이 정확히 맞는다.
+            cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+            print(f"[*] 전체화면 표시 시작 — q 누르면 종료")
+        else:
+            cv2.resizeWindow(WINDOW_NAME, bev_render.CANVAS_W, bev_render.CANVAS_H)
+            print(f"[*] 화면 표시 시작 — '{WINDOW_NAME}' 창에서 q 누르면 종료")
+            print("[*] 창이 안 보이면 다른 창에 가려진 것입니다 (Alt+Tab으로 전환)")
     saved = 0
     while True:
         camera, targets, detection = state.snapshot()
@@ -520,11 +565,22 @@ def parse_args():
                         help="창을 띄우지 않고 합성 프레임을 DIR에 PNG로 저장 (헤드리스 점검용)")
     parser.add_argument("--frames", type=int, default=8,
                         help="--snapshot일 때 저장할 장수")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="전체화면으로 표시 (차량 디스플레이용). 종료는 q")
+    parser.add_argument("--theme", default="day", choices=sorted(bev_render.THEMES),
+                        help="화면 팔레트. night=야간 계기판(기본), day=주간 주행용 밝은 배경. "
+                             "햇빛 아래에서는 night가 거의 안 보인다")
+    parser.add_argument("--monitor", default=None, metavar="NAME",
+                        help="표시할 모니터 이름(예: HDMI-1-0). 확장 배치에서 운전자용 "
+                             "외장 디스플레이를 지정할 때 사용. `xrandr --listmonitors` 참고")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    bev_render.set_theme(args.theme)
+    print(f"[*] 화면 팔레트: {args.theme}")
 
     print("[*] Detection 모델(구급차/오토바이) 로딩 중...")
     detector = load_detector()
@@ -550,7 +606,8 @@ def main():
 
     try:
         # 메인 스레드 — OpenCV 창은 메인 스레드에서 돌려야 안전
-        video_loop(state, receiver, snapshot_dir=args.snapshot, frames=args.frames)
+        video_loop(state, receiver, snapshot_dir=args.snapshot, frames=args.frames,
+                   fullscreen=args.fullscreen, monitor=args.monitor)
     except KeyboardInterrupt:
         pass
     finally:

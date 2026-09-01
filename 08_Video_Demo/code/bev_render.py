@@ -30,6 +30,7 @@ BEV는 단순화된 마커가 아니라 **LiDAR가 실제로 들고 있는 포�
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -42,32 +43,93 @@ import lidar_distance_match as lidar
 CANVAS_W, CANVAS_H = 1600, 900
 BANNER_H = 125
 SPLIT_X = CANVAS_W // 2          # 좌: BEV / 우: 카메라
+TEXT_SCALE = 1.0                 # configure_canvas()가 해상도에 맞춰 조정
 
 # ---- BEV 좌표계 ----------------------------------------------------------------
 CX, CY = 400, 512                # 자차 위치(=LiDAR 원점)
 RMAX = 300                       # RANGE_MAX_M에 해당하는 픽셀 반지름
+
+
+def configure_canvas(width: int, height: int):
+    """캔버스를 표시 해상도에 맞춰 다시 잡는다. 파생 좌표와 글자 크기를 함께 조정한다.
+
+    ⚠️ 왜 필요한가: 1600x900으로 그린 뒤 1920x1080 창에 띄우면 OpenCV가 확대하지 않고
+       가운데 정렬해서 주변에 여백이 남는다. 차량 디스플레이는 화면이 꽉 차야 하므로
+       **표시할 해상도 그대로 그린다** — 스케일이 없으니 글자도 흐려지지 않는다.
+
+    비율은 원본(1600x900) 기준을 그대로 따른다.
+    """
+    global CANVAS_W, CANVAS_H, BANNER_H, SPLIT_X, CX, CY, RMAX, TEXT_SCALE
+    global _background_cache, _scratch
+
+    CANVAS_W, CANVAS_H = int(width), int(height)
+    BANNER_H = int(round(CANVAS_H * 148 / 900))
+    SPLIT_X = CANVAS_W // 2
+    CX = int(round(CANVAS_W * 400 / 1600))
+    CY = int(round(CANVAS_H * 524 / 900))
+    RMAX = int(round(CANVAS_H * 292 / 900))
+    TEXT_SCALE = CANVAS_H / 900.0
+    _background_cache = None      # 해상도가 바뀌었으니 캐시된 배경은 못 쓴다
+    _scratch = None
+    _TEXT.reset()
+    _TEXT._key = None             # 글자 캐시도 좌표가 바뀌었으므로 무효화
+
+
+def _ts(size: int) -> int:
+    """해상도에 맞춘 글자 크기."""
+    return max(8, int(round(size * TEXT_SCALE)))
+
+
+def _px(n):
+    """해상도에 맞춘 픽셀 길이(원본 1600x900 기준)."""
+    return int(round(n * TEXT_SCALE))
 RANGE_MAX_M = 40.0               # 지도 바깥 테두리까지의 거리
 RING_M = (10.0, 20.0, 40.0)
 BLIND_M = lidar.BLIND_RADIUS_M   # 6.0 — 물리적 사각지대
 
 # ---- 색 (BGR) ------------------------------------------------------------------
-PAGE_BG = (10, 8, 8)             # #08080A
-CAM_BG = (13, 11, 10)            # 카메라 레터박스 여백
-EDGE = (39, 35, 35)              # #232327
-TXT = (245, 245, 245)
-DIM = (130, 122, 122)            # #7A7A82
-TEAL = (199, 194, 0)             # #00C2C7
-YELLOW = (0, 212, 255)           # #FFD400
-RED = (48, 59, 255)              # #FF3B30
-VIOLET = (255, 140, 185)         # #B98CFF
-RING = (40, 33, 30)              # #1E2128
-RING_TXT = (77, 67, 62)          # #3E434D
-BLIND_FILL = (16, 13, 12)        # #101216 계열. sqrt 스케일이라 6m가 반지름의 38%를 차지해서,
-                                 # 밝게 칠하면 지도를 삼킨다 — 페이지 배경에 가깝게 낮춰 둔다.
-AMBIENT_PT = (54, 46, 42)        # #2A2E36
+# 두 벌을 둔다. 주 사용자가 청각장애인이라 화면이 유일한 전달 경로인데, 야간용 어두운
+# 팔레트를 주간 주행에 그대로 쓰면 햇빛 아래에서 거의 안 보인다 — 특히 "주의"의 노란색은
+# 밝은 배경에서 대비가 무너진다. set_theme()으로 통째로 갈아끼운다.
+THEMES = {
+    # 야간·기본 — 계기판 톤. 목업(camera_ui_mockup.html)의 색이 이쪽이다.
+    "night": dict(
+        PAGE_BG=(10, 8, 8), CAM_BG=(13, 11, 10), BANNER_BG=(0, 0, 0),
+        EDGE=(39, 35, 35), TXT=(245, 245, 245), DIM=(130, 122, 122),
+        TEAL=(199, 194, 0), YELLOW=(0, 212, 255), RED=(48, 59, 255),
+        VIOLET=(255, 140, 185), RING=(40, 33, 30), RING_TXT=(77, 67, 62),
+        BLIND_FILL=(16, 13, 12), AMBIENT_PT=(54, 46, 42),
+        CHIP_TXT=(12, 12, 12), ARROW_RING=(60, 56, 54), BLIND_EDGE=(44, 37, 34),
+    ),
+    # 주간 — 밝은 바탕. 순백은 눈부심이 심해 살짝 낮춘 회백색을 쓰고, 신호색은 밝은
+    # 바탕에서 대비가 나오도록 어둡게 내렸다(노랑 -> 호박색, 청록·보라도 채도 유지하며 하향).
+    "day": dict(
+        PAGE_BG=(242, 242, 240), CAM_BG=(232, 232, 230), BANNER_BG=(252, 252, 251),
+        EDGE=(200, 200, 198), TXT=(24, 24, 26), DIM=(110, 108, 106),
+        TEAL=(128, 122, 0), YELLOW=(0, 122, 184), RED=(32, 32, 211),
+        VIOLET=(168, 60, 96), RING=(200, 200, 198), RING_TXT=(122, 120, 118),
+        BLIND_FILL=(226, 226, 224), AMBIENT_PT=(178, 176, 174),
+        CHIP_TXT=(250, 250, 250), ARROW_RING=(170, 168, 166), BLIND_EDGE=(196, 194, 192),
+    ),
+}
+THEME = "day"   # 주간 주행 기준이 기본. 야간은 --theme night
 
-KIND_COLOR = {"car_horn": TEAL, "siren": RED, "motorcycle": VIOLET}
-LEVEL_COLOR = {"주의": YELLOW, "경고": RED}
+PAGE_BG = CAM_BG = BANNER_BG = EDGE = TXT = DIM = None
+TEAL = YELLOW = RED = VIOLET = RING = RING_TXT = None
+BLIND_FILL = AMBIENT_PT = CHIP_TXT = ARROW_RING = BLIND_EDGE = None
+KIND_COLOR = LEVEL_COLOR = None
+
+
+def set_theme(name: str):
+    """팔레트를 통째로 교체한다. 배경 캐시도 함께 무효화한다."""
+    global THEME, KIND_COLOR, LEVEL_COLOR, _background_cache
+    if name not in THEMES:
+        raise ValueError(f"알 수 없는 테마: {name} (가능: {', '.join(THEMES)})")
+    THEME = name
+    globals().update(THEMES[name])
+    KIND_COLOR = {"car_horn": TEAL, "siren": RED, "motorcycle": VIOLET}
+    LEVEL_COLOR = {"주의": YELLOW, "경고": RED}
+    _background_cache = None
 CLASS_LABEL_KO = {"car_horn": "경적", "siren": "사이렌", "motorcycle": "오토바이"}
 CAMERA_LABEL_KO = {"front": "전방 카메라", "left": "좌측 카메라",
                    "right": "우측 카메라", "rear": "후방 카메라(기본)"}
@@ -134,6 +196,10 @@ class TextLayer:
         self._key = None
         self._cache = None
 
+    def reset(self):
+        """모아둔 항목을 버린다 (캐시는 유지). 프레임이 예외로 중단됐을 때 잔여 정리용."""
+        self._items = []
+
     def add(self, text, xy, size, color_bgr, anchor="lt"):
         self._items.append((text, (float(xy[0]), float(xy[1])), size,
                             tuple(int(c) for c in color_bgr), anchor))
@@ -168,6 +234,7 @@ class TextLayer:
 
 
 _TEXT = TextLayer()
+set_theme(THEME)   # 모듈 로드 시 기본 팔레트 적용
 
 
 # ---- 좌표 변환 ------------------------------------------------------------------
@@ -252,18 +319,18 @@ def build_background():
             _dashed_circle(img, (CX, CY), r, RING)
         else:
             cv2.circle(img, (CX, CY), r, RING, 1, cv2.LINE_AA)
-        text.add(f"{m:.0f}m", (CX + 6, CY - r + 3), 13, RING_TXT)
+        text.add(f"{m:.0f}m", (CX + 6, CY - r + 3), _ts(18), RING_TXT)
 
     # 사각지대 원반은 링보다 위에 올려 안쪽 링 선이 비치지 않게 한다.
     cv2.circle(img, (CX, CY), int(radius_px(BLIND_M)), BLIND_FILL, -1, cv2.LINE_AA)
-    _dashed_circle(img, (CX, CY), int(radius_px(BLIND_M)), (44, 37, 34), dash_deg=4, gap_deg=7)
+    _dashed_circle(img, (CX, CY), int(radius_px(BLIND_M)), BLIND_EDGE, dash_deg=4, gap_deg=7)
 
     # 방위 글자는 **시스템 theta 기준**으로 배치한다(반시계 +): 우측은 theta=-90.
     for label, theta in (("전", 0.0), ("우", -90.0), ("후", 180.0), ("좌", 90.0)):
         x, y = to_px(theta, RANGE_MAX_M)
         x += (x - CX) * 0.12
         y += (y - CY) * 0.12
-        text.add(label, (float(x), float(y)), 14, RING_TXT, anchor="mm")
+        text.add(label, (float(x), float(y)), _ts(24), RING_TXT, anchor="mm")
 
     text.flush(img)
     _background_cache = img
@@ -337,9 +404,10 @@ def draw_cluster(img, theta_deg, distance_m, color, cluster_points=None, pulse=F
     """확정 대상: 실제 리턴 점을 클래스 색으로 다시 칠하고 후광을 얹는다."""
     cx, cy = to_px(theta_deg, distance_m)
     cx, cy = int(round(float(cx))), int(round(float(cy)))
-    _blend_shape(img, lambda o: cv2.circle(o, (cx, cy), 40, color, -1, cv2.LINE_AA), color, 0.14)
+    _blend_shape(img, lambda o: cv2.circle(o, (cx, cy), _px(40), color, -1, cv2.LINE_AA),
+                 color, 0.14)
     if pulse:
-        cv2.circle(img, (cx, cy), 56, color, 1, cv2.LINE_AA)
+        cv2.circle(img, (cx, cy), _px(56), color, 1, cv2.LINE_AA)
     if cluster_points is not None and cluster_points.shape[0]:
         draw_lidar_points(img, cluster_points, color, size=2)
     else:
@@ -356,10 +424,47 @@ def draw_blind(img, theta_deg, spread_deg=90.0):
     cv2.ellipse(img, (CX, CY), (rb, rb), 0, start, end, RED, 1, cv2.LINE_AA)
 
 
-def draw_ego(img):
-    cv2.rectangle(img, (CX - 13, CY - 22), (CX + 13, CY + 22), TEAL, 2, cv2.LINE_AA)
-    cv2.polylines(img, [np.array([[CX - 7, CY - 5], [CX, CY - 15], [CX + 7, CY - 5]])],
-                  False, TEAL, 2, cv2.LINE_AA)
+def alert_period(distance, blind):
+    """경고 깜빡임 주기(초). 가까울수록 빠르다 — ui_state_spec.md §5."""
+    if blind or distance is None:
+        return 0.3                                   # 사각지대·미확정 = 가장 급함
+    return min(1.2, max(0.3, distance / 25.0 * 1.2))  # 25m에서 1.2초
+
+
+def pulse_level(period):
+    """0~1 삼각파. 사각형파로 깜빡이면 눈이 피로해 밝기를 부드럽게 오르내린다."""
+    return abs((time.time() % period) / period * 2.0 - 1.0)
+
+
+def draw_ego(img, alerts=()):
+    """자차 + 위험 방향 테두리 점등.
+
+    alerts: [(theta, color, period_or_None)] — period가 있으면 깜빡이고, None이면 정적.
+
+    차체 테두리에서 해당 방향만 빛나게 하는 건 양산차의 사각지대 경고등과 같은 방식이라
+    설명 없이 읽힌다. 주 사용자가 청각장애인이라 "어느 쪽인지"를 가장 빨리 전달해야 하는데,
+    지도 바깥의 마커를 찾는 것보다 자차 테두리를 보는 편이 시선 이동이 적다.
+    """
+    w, h = _px(30), _px(48)
+    ring_r = int(max(w, h) * 1.5)
+
+    for theta, color, period in alerts:
+        level = pulse_level(period) if period else 1.0
+        thick = _px(9) + int(_px(8) * level)
+        col = tuple(int(c * (0.35 + 0.65 * level)) for c in color)
+        start, end = _cv_arc_angles(theta, 76.0)
+        cv2.ellipse(img, (CX, CY), (ring_r, ring_r), 0, start, end, col, thick, cv2.LINE_AA)
+
+    # 차체 — 앞쪽이 좁은 사다리꼴이라 방향이 형태만으로도 읽힌다.
+    nose, tail = int(w * 0.62), int(w * 0.92)
+    body = np.array([[CX - nose, CY - h], [CX + nose, CY - h],
+                     [CX + tail, CY - int(h * 0.25)], [CX + tail, CY + h],
+                     [CX - tail, CY + h], [CX - tail, CY - int(h * 0.25)]])
+    _blend_shape(img, lambda o: cv2.fillPoly(o, [body], TEAL), TEAL, 0.22)
+    cv2.polylines(img, [body], True, TEAL, _px(3), cv2.LINE_AA)
+    cv2.polylines(img, [np.array([[CX - _px(13), CY - _px(6)], [CX, CY - _px(26)],
+                                  [CX + _px(13), CY - _px(6)]])],
+                  False, TEAL, _px(4), cv2.LINE_AA)
 
 
 # ---- 카메라 절반 -----------------------------------------------------------------
@@ -374,7 +479,7 @@ def draw_camera_selector(img, active, level, text, x0, y0, width):
     화각을 잘라내면서까지 채우는 것보다(주행 중 대상이 가장자리로 지나간다) 그 여백을
     "지금 어느 방향 카메라인지"에 쓰는 편이 낫다 — 영상에서 카메라 자동 전환이 눈에 보인다.
     """
-    cell_w, cell_h, gap = 62, 30, 6
+    cell_w, cell_h, gap = _px(78), _px(40), _px(8)
     total = len(CAMERA_ORDER) * cell_w + (len(CAMERA_ORDER) - 1) * gap
     sx = x0 + (width - total) // 2
     for i, name in enumerate(CAMERA_ORDER):
@@ -382,7 +487,7 @@ def draw_camera_selector(img, active, level, text, x0, y0, width):
         on = name == active
         color = LEVEL_COLOR.get(level, TEAL) if on else EDGE
         cv2.rectangle(img, (cx0, y0), (cx0 + cell_w, y0 + cell_h), color, -1 if on else 1)
-        text.add(CAMERA_SHORT_KO[name], (cx0 + cell_w // 2, y0 + cell_h // 2), 17,
+        text.add(CAMERA_SHORT_KO[name], (cx0 + cell_w // 2, y0 + cell_h // 2), _ts(22),
                  (12, 12, 12) if on else DIM, anchor="mm")
 
 
@@ -395,7 +500,7 @@ def draw_camera_pane(img, frame_bgr, detection, text, active_camera=None, level=
     pane_h = CANVAS_H - BANNER_H
     if frame_bgr is None:
         text.add("카메라 프레임 없음", (SPLIT_X + pane_w // 2, BANNER_H + pane_h // 2),
-                 22, DIM, anchor="mm")
+                 _ts(28), DIM, anchor="mm")
         return None
 
     fh, fw = frame_bgr.shape[:2]
@@ -421,34 +526,59 @@ def draw_camera_pane(img, frame_bgr, detection, text, active_camera=None, level=
             cv2.putText(img, tag, (bx0 + 6, by0 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (10, 10, 10), 1, cv2.LINE_AA)
 
-    if active_camera is not None and (y0 - BANNER_H) >= 46:
+    if active_camera is not None and (y0 - BANNER_H) >= _px(56):
         draw_camera_selector(img, active_camera, level, text,
-                             SPLIT_X, BANNER_H + (y0 - BANNER_H - 30) // 2, pane_w)
+                             SPLIT_X, BANNER_H + (y0 - BANNER_H - _px(40)) // 2, pane_w)
     return x0, y0, vw, vh
 
 
 # ---- 배너 -------------------------------------------------------------------------
+def draw_direction_arrow(img, cx, cy, radius, theta_ccw, color):
+    """실제 감지 방향으로 회전한 화살표. 자차를 나타내는 링 안에서 바깥을 가리킨다.
+
+    "→ 좌측"이라는 글자만으로는 읽고 해석하는 시간이 든다. 주 사용자가 청각장애인이라
+    소리로 방향을 보완할 수 없으므로, **방향은 글자가 아니라 그림으로** 먼저 전달한다.
+    """
+    a = np.radians(_screen_angle(theta_ccw) - 90.0)
+    ca, sa = float(np.cos(a)), float(np.sin(a))
+    cv2.circle(img, (cx, cy), radius, ARROW_RING, 2, cv2.LINE_AA)
+    tail = (int(cx - ca * radius * 0.55), int(cy - sa * radius * 0.55))
+    tip = (int(cx + ca * radius * 0.95), int(cy + sa * radius * 0.95))
+    cv2.arrowedLine(img, tail, tip, color, max(2, _px(5)), cv2.LINE_AA, tipLength=0.45)
+
+
 def draw_banner(img, banner, text):
-    cv2.rectangle(img, (0, 0), (CANVAS_W, BANNER_H), (0, 0, 0), -1)
+    cv2.rectangle(img, (0, 0), (CANVAS_W, BANNER_H), BANNER_BG, -1)
     cv2.line(img, (0, BANNER_H), (CANVAS_W, BANNER_H), EDGE, 1)
     if banner is None:
-        text.add("올빼미러 · 감지 없음", (24, 46), 22, DIM)
+        text.add("올빼미러 · 감지 없음", (_px(26), _px(73)), _ts(30), DIM, anchor="lm")
         return
 
     col = KIND_COLOR[banner["class_name"]]
     level_col = LEVEL_COLOR[banner["level"]]
-    cv2.rectangle(img, (20, 24), (206, 100), col, -1)
-    text.add(CLASS_LABEL_KO[banner["class_name"]], (113, 62), 30, (12, 12, 12), anchor="mm")
+
+    # ── 소리 종류: 아이콘 + 글자 ──────────────────────────────────────────────
+    # 글자만으로는 흘긋 봐서 구분하기 어렵다. 청각장애인 운전자가 주 대상이라 소리로
+    # 보완할 수 없으므로, 종류도 그림으로 먼저 알아볼 수 있어야 한다. 아이콘과 글자를
+    # 함께 두는 것은 중복이 아니라 이중 경로다 — 둘 중 하나만 봐도 알 수 있게.
+    cv2.rectangle(img, (_px(20), _px(18)), (_px(372), _px(128)), col, -1)
+    _glyph(img, GLYPH_KIND[banner["class_name"]], _px(72), _px(73),
+           0.60 * TEXT_SCALE, CHIP_TXT)
+    text.add(CLASS_LABEL_KO[banner["class_name"]], (_px(124), _px(73)), _ts(46),
+             CHIP_TXT, anchor="lm")
+
+    # ── 방향: 회전 화살표 ─────────────────────────────────────────────────────
+    if banner.get("theta") is not None:
+        draw_direction_arrow(img, _px(432), _px(73), _px(42), banner["theta"], level_col)
 
     # detail은 왜 이 단계가 됐는지를 알려주는 근거 문구(alert_policy가 정한다).
     # 거리가 있으면 거리를 같이 붙인다 — "경고 → 좌측 · 차량 확정 · 32m"
-    parts = [banner["level"], "→", banner["loc"]]
-    line = " ".join(parts)
+    line = f"{banner['level']} · {banner['loc']}"
     if banner.get("detail"):
         line += " · " + banner["detail"]
     if banner["distance"] is not None:
         line += f" · {banner['distance']:.0f}m"
-    text.add(line, (226, 62), 26, level_col, anchor="lm")
+    text.add(line, (_px(500), _px(73)), _ts(36), level_col, anchor="lm")
 
 
 # ---- 최종 합성 ---------------------------------------------------------------------
@@ -464,67 +594,80 @@ def render(camera_frame_bgr, camera_name, targets, points=None,
     """
     img = build_background()
     text = _TEXT  # 모듈 전역 — 프레임 사이에 살아 있어야 글자 캐시가 적중한다
+    text.reset()  # 앞 프레임이 예외로 중단됐다면 남은 항목이 쌓여 있을 수 있다
 
     ground_filtered = None
     if points is not None and points.shape[0]:
         ground_filtered = lidar.filter_ground(points)
         draw_lidar_points(img, ground_filtered, AMBIENT_PT, size=1)
 
+    ego_alerts = []
     for i, tgt in enumerate(targets):
         col = LEVEL_COLOR.get(tgt["level"], KIND_COLOR[tgt["class_name"]])
+        # 경고는 깜빡이고 주의는 정적으로 — 단계 차이가 움직임으로도 구분된다
+        ego_alerts.append((tgt["theta"], col,
+                           alert_period(tgt["distance"], tgt["blind"])
+                           if tgt["level"] == "경고" else None))
         kind = GLYPH_KIND[tgt["class_name"]]
         theta = tgt["theta"]
         if tgt["blind"]:
             draw_blind(img, theta)
             gx, gy = to_px(theta, BLIND_M * 0.75)
-            _glyph(img, kind, float(gx), float(gy) - 16, 0.52, RED)
-            text.add(tgt.get("detail") or "사각지대", (float(gx), float(gy) + 26), 18,
+            _glyph(img, kind, float(gx), float(gy) - _px(16), 0.52 * TEXT_SCALE, RED)
+            text.add(tgt.get("detail") or "사각지대", (float(gx), float(gy) + _px(26)), 18,
                      RED, anchor="mm")
         elif tgt["distance"] is not None:
             cluster = _select_cluster_points(ground_filtered, theta, tgt["distance"],
                                              lidar.DEFAULT_ANGLE_MARGIN_DEG)
             cx, cy = draw_cluster(img, theta, tgt["distance"], col, cluster,
                                   pulse=(tgt["level"] == "경고"))
-            _glyph(img, kind, cx, cy - 38, 0.52, col)
+            _glyph(img, kind, cx, cy - _px(38), 0.52 * TEXT_SCALE, col)
             left = cx < CX
-            text.add(f"{tgt['distance']:.0f}m", (cx - 44 if left else cx + 44, cy + 4),
-                     20, col, anchor="rm" if left else "lm")
+            text.add(f"{tgt['distance']:.0f}m", (cx - _px(44) if left else cx + _px(44), cy + _px(4)),
+                     _ts(28), col, anchor="rm" if left else "lm")
         else:
             draw_wedge(img, theta, max(2.0 * tgt.get("sigma", 12.0), 16.0), col, ground_filtered)
             gx, gy = to_px(theta, 30.0)
-            _glyph(img, kind, float(gx), float(gy), 0.58, col)
+            _glyph(img, kind, float(gx), float(gy), 0.58 * TEXT_SCALE, col)
             if i == 0:
                 text.add(tgt.get("detail") or "위치 미확정",
-                         (float(gx), float(gy) + 40), 18, col, anchor="mm")
+                         (float(gx), float(gy) + _px(40)), 18, col, anchor="mm")
 
-    draw_ego(img)
+    draw_ego(img, ego_alerts)
 
     # LiDAR 상태를 BEV 좌하단에 항상 명시 — 점이 안 보일 때 "조용한 도로"인지 "센서 없음"인지
     # 구분이 안 되면 화면이 거짓말을 하게 된다.
     if not lidar_ok:
-        text.add("LiDAR 미연결 — 방향만 표시", (20, CANVAS_H - 30), 17, YELLOW)
+        text.add("LiDAR 미연결 — 방향만 표시", (_px(20), CANVAS_H - _px(18)), _ts(22), YELLOW, anchor="lb")
     else:
         n = 0 if ground_filtered is None else int(round(ground_filtered.shape[0], -2))
-        text.add(f"LiDAR ~{n:,} pts", (20, CANVAS_H - 30), 17, RING_TXT)
+        text.add(f"LiDAR ~{n:,} pts", (_px(20), CANVAS_H - _px(18)), _ts(22), RING_TXT, anchor="lb")
 
     draw_camera_pane(img, camera_frame_bgr, detection, text, camera_name,
                      targets[0]["level"] if targets else None)
     text.add(CAMERA_LABEL_KO.get(camera_name, camera_name),
-             (SPLIT_X + 20, CANVAS_H - 30), 20, DIM)
+             (SPLIT_X + _px(20), CANVAS_H - _px(18)), _ts(28), DIM, anchor="lb")
     if link is not None and not link.get("connected", True):
-        text.add("젯슨 연결 끊김 — 오디오 감지 없음", (SPLIT_X + 20, BANNER_H + 16), 20, RED)
+        text.add("젯슨 연결 끊김 — 오디오 감지 없음", (SPLIT_X + _px(20), BANNER_H + _px(16)), _ts(28), RED)
 
     banner = None
     if targets:
         t0 = targets[0]
         banner = {"class_name": t0["class_name"], "loc": t0["loc"], "level": t0["level"],
                   "distance": t0["distance"], "blind": t0["blind"],
-                  "detail": t0.get("detail")}
+                  "detail": t0.get("detail"), "theta": t0.get("theta")}
     draw_banner(img, banner, text)
 
-    # 경고 테두리(ui_state_spec.md §5 "테두리 빛") — 정적 근사, 애니메이션은 생략
+    # 경고 테두리(ui_state_spec.md §5 "테두리 빛") — 거리에 반비례해 깜빡인다.
+    # 주 사용자가 청각장애인이라 경고음으로 주의를 끌 수 없다. 정지된 테두리는 화면을
+    # 직접 보고 있을 때만 눈에 들어오지만, 깜빡임은 주변시야에도 걸린다 — 전방을 보고
+    # 운전하는 중에 알아차리게 하려면 이 움직임이 있어야 한다.
     if banner is not None and banner["level"] == "경고":
-        cv2.rectangle(img, (3, 3), (CANVAS_W - 3, CANVAS_H - 3), RED, 6)
+        level = pulse_level(alert_period(banner["distance"], banner["blind"]))
+        thick = _px(6) + int(_px(6) * level)
+        border = tuple(int(c * (0.45 + 0.55 * level)) for c in RED)
+        cv2.rectangle(img, (thick // 2, thick // 2),
+                      (CANVAS_W - thick // 2, CANVAS_H - thick // 2), border, thick)
 
     text.flush(img)
     return img
