@@ -204,7 +204,8 @@ def run_simulate(sender: Sender, interval: float, verbose: bool):
 
 def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
              mount_offset: float, sigma: float, verbose: bool,
-             svm_path=None, panns_path=None, min_db: float = MIN_ALERT_DB):
+             svm_path=None, panns_path=None, min_db: float = MIN_ALERT_DB,
+             device: str = "auto"):
     """실제 ReSpeaker에서 수음 → 분류 → DoA → 전송.
 
     svm_path/panns_path를 주면 저장소 구조 밖에 있는 가중치도 쓸 수 있다 — 젯슨에는 보통
@@ -241,7 +242,7 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
         print("    --svm-path 로 실제 위치를 지정하세요.")
         return
     clf.ensure_panns_checkpoint(panns_path)
-    panns_model = clf.load_panns_model(panns_path)
+    panns_model = clf.load_panns_model(panns_path, device)
     svm, class_names, _ = clf.load_svm(svm_path)
     print(f"[*] 클래스: {class_names}")
 
@@ -391,6 +392,10 @@ def main():
     # 추론이 느린 게 아니라 이 sleep이 원인이었다 — 0으로 두면 1.22초까지 당겨진다.
     parser.add_argument("--interval", type=float, default=0.0,
                         help="전송 주기(초). 스펙은 0.25지만 CPU 추론 속도에 따라 조정")
+    parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"),
+                        help="추론 장치. auto면 CUDA가 있으면 쓴다. "
+                             "⚠️ CUDA가 있어도 모델을 옮기지 않으면 CPU로 도는데, "
+                             "그 상태가 2026-09-02까지 계속되고 있었다(3.6배 손해)")
     parser.add_argument("--min-db", type=float, default=MIN_ALERT_DB,
                         help="이 음량(dBFS) 아래로는 감지를 내보내지 않는다 — 조용할 때 나오는 "
                              "오경보 차단용. 주행 중에는 배경 소음이 올라가므로 재조정 필요")
@@ -416,7 +421,7 @@ def main():
         else:
             run_live(sender, args.seconds, args.interval, args.min_score,
                      args.mount_offset, args.sigma, args.verbose,
-                     args.svm_path, args.panns_path, args.min_db)
+                     args.svm_path, args.panns_path, args.min_db, args.device)
     finally:
         sender.close()
 

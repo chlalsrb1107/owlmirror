@@ -65,7 +65,21 @@ def ensure_panns_checkpoint(ckpt_path: Path):
     urllib.request.urlretrieve(PANNS_CKPT_URL, ckpt_path)
 
 
-def load_panns_model(ckpt_path: Path):
+def resolve_device(device: str = "auto") -> str:
+    """"auto"면 CUDA가 쓸 수 있을 때 cuda, 아니면 cpu."""
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
+def load_panns_model(ckpt_path: Path, device: str = "auto"):
+    """PANNs Cnn14를 로드하고 **지정 장치로 옮긴다**.
+
+    ⚠️ 2026-09-02 발견: 이 함수가 모델을 GPU로 옮기지 않아, CUDA가 멀쩡히 있는 젯슨에서도
+       추론이 CPU에서 돌고 있었다. `torch.cuda.is_available()`이 True인 것과 모델이 GPU에
+       올라가는 것은 별개다 — `map_location="cpu"`로 읽은 뒤 `.to()`를 하지 않으면 CPU에
+       남는다. 실측: CPU 약 200~278ms vs CUDA 78ms(3.6배).
+    """
     from panns_inference.models import Cnn14
 
     model = Cnn14(sample_rate=16000, window_size=512, hop_size=160,
@@ -73,6 +87,17 @@ def load_panns_model(ckpt_path: Path):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"])
     model.eval()
+
+    dev = resolve_device(device)
+    model.to(dev)
+    if dev == "cuda":
+        # 첫 CUDA 호출은 커널 컴파일·메모리 할당 때문에 유독 느리다. 여기서 미리 태워
+        # 없애지 않으면 "첫 감지만 유독 늦는" 현상이 된다(YOLO 워밍업과 같은 이유).
+        with torch.no_grad():
+            model(torch.zeros(1, SR, device=dev))
+        torch.cuda.synchronize()
+    print(f"[*] PANNs 장치: {dev}"
+          + (f" ({torch.cuda.get_device_name(0)})" if dev == "cuda" else ""))
     return model
 
 
@@ -87,9 +112,12 @@ def load_svm(svm_path: Path):
 
 
 def classify(panns_model, clf, class_names, audio_f32: np.ndarray):
-    audio_t = torch.from_numpy(audio_f32).unsqueeze(0)
+    # 입력 텐서를 모델과 같은 장치로 보낸다. 모델만 GPU에 있고 입력이 CPU면 런타임 에러다.
+    device = next(panns_model.parameters()).device
+    audio_t = torch.from_numpy(audio_f32).unsqueeze(0).to(device)
     with torch.no_grad():
-        embedding = panns_model(audio_t)["embedding"].numpy()
+        # SVM(sklearn)은 CPU numpy만 받으므로 임베딩은 다시 내려받는다
+        embedding = panns_model(audio_t)["embedding"].cpu().numpy()
     scores = clf.decision_function(embedding)[0]
     order = np.argsort(scores)[::-1]
     return [(class_names[i], float(scores[i])) for i in order]
