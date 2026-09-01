@@ -361,6 +361,7 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
     이 스레드는 네트워크 수신만 기다리고, 무거운 작업(YOLO, LiDAR 매칭)은 그대로 여기서 한다.
     """
     was_connected = False
+    last_camera = "rear"   # 방향을 못 믿을 때 되돌아갈 기준 화면
     while True:
         link = receiver.link()
         if link["connected"] != was_connected:
@@ -388,20 +389,38 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
         if top_class == "car_horn" and not policy.horn_accepts(doa, rms_db):
             continue
 
-        camera = select_camera(doa, mount_offset_deg=0.0)
+        # ⚠️ 젯슨이 방향을 못 믿겠다고 표시하면(theta_ok=False) 그 방향으로 카메라를
+        #    돌리지 않는다. 소리가 끊긴 구간에서 DoA가 튀면 화면이 엉뚱한 쪽으로
+        #    홱홱 돌아가는데, 그건 알려주지 않느니만 못하다 — 특히 청각장애인 운전자는
+        #    화면을 되짚어 확인할 다른 경로가 없다.
+        theta_ok = bool(packet.get("theta_ok", True))
+        if theta_ok:
+            camera = select_camera(doa, mount_offset_deg=0.0)
+            last_camera = camera
+        else:
+            camera = last_camera
+
         detection = (run_detection(detector, camera, top_class)
                      if top_class in DETECTION_CLASSES else None)
         level, distance, blind, detail = decide_alert(policy, top_class, doa, detection,
-                                                      rms_db, score)
+                                                      rms_db, score, theta_ok)
+        # 방향을 모를 때 "위치 미확정"까지 덧붙이면 배너에 같은 말이 두 번 나온다
+        # ("경고 · 방향 미확정 · 위치 미확정"). 방향 쪽 문구만 남긴다.
+        if not theta_ok and detail == "위치 미확정":
+            detail = None
 
         latency_ms = (time.time() - packet["t"]) * 1000
         print(f"[{time.strftime('%H:%M:%S')}] class={top_class} "
-              f"score={score:+.3f} theta={doa:.1f} rms={rms_db:.1f}dB "
+              f"score={score:+.3f} theta={doa:.1f}{'' if theta_ok else '(불신)'} "
+              f"rms={rms_db:.1f}dB "
               f"(수음~표시 지연 {latency_ms:.0f}ms)")
         print(f"    -> {camera} 카메라로 전환, level={level} ({detail}), "
               f"distance={distance}, blind={blind}, detection={detection}")
-        state.trigger(camera, top_class, LOC_LABEL_KO[camera], detection, level, distance, blind,
-                      theta=doa, sigma=float(packet.get("sigma", 12.0)), detail=detail)
+        state.trigger(camera, top_class,
+                      LOC_LABEL_KO[camera] if theta_ok else "방향 미확정",
+                      detection, level, distance, blind,
+                      theta=doa if theta_ok else None,
+                      sigma=float(packet.get("sigma", 12.0)), detail=detail)
 
 
 def lidar_match(doa_deg: float):
@@ -417,7 +436,7 @@ def lidar_match(doa_deg: float):
 
 
 def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection,
-                 rms_db: float, score: float):
+                 rms_db: float, score: float, theta_ok: bool = True):
     """(level, distance, blind, detail)을 정한다. 규칙 자체는 alert_policy.py에 있다.
 
     detail은 배너 오른쪽에 붙는 짧은 문구다 — 왜 이 단계가 됐는지를 운전자가 읽을 수 있게
@@ -429,11 +448,19 @@ def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection
        하지 않는다 — 그 캡은 모든 판정이 거리에 매여 있던 시절의 폴백이었다.
     """
     if class_name == "car_horn":
-        level, repeats = policy.horn_level(doa_deg, rms_db)
-        detail = f"반복 {repeats}회" if level == "경고" else "방향 안내"
-        return level, None, False, detail
+        level, repeats, near = policy.horn_level(doa_deg, rms_db)
+        if near:
+            detail = "근접"          # 소리만으로도 바로 옆이라고 판단
+        elif level == "경고":
+            detail = f"반복 {repeats}회"
+        else:
+            detail = "방향 안내"
+        return level, None, near, detail
 
-    match = lidar_match(doa_deg) if class_name in LIDAR_MATCH_CLASSES else None
+    # ⚠️ 방향을 못 믿으면 라이다도 조회하지 않는다. 그 각도로 점군을 뒤지면 엉뚱한
+    #    방향의 물체까지 거리를 재서, 틀린 방향에 그럴듯한 숫자를 붙이게 된다.
+    match = (lidar_match(doa_deg)
+             if theta_ok and class_name in LIDAR_MATCH_CLASSES else None)
 
     if class_name == "siren":
         level, distance, blind = policy.siren_level(match)

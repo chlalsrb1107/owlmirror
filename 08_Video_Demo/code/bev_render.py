@@ -570,6 +570,10 @@ def draw_banner(img, banner, text):
     # ── 방향: 회전 화살표 ─────────────────────────────────────────────────────
     if banner.get("theta") is not None:
         draw_direction_arrow(img, _px(432), _px(73), _px(42), banner["theta"], level_col)
+    else:
+        # 방향 불신 — 화살표 자리에 물음표를 둬서 "방향은 모른다"를 명시한다.
+        cv2.circle(img, (_px(432), _px(73)), _px(42), ARROW_RING, 2, cv2.LINE_AA)
+        text.add("?", (_px(432), _px(73)), _ts(38), level_col, anchor="mm")
 
     # detail은 왜 이 단계가 됐는지를 알려주는 근거 문구(alert_policy가 정한다).
     # 거리가 있으면 거리를 같이 붙인다 — "경고 → 좌측 · 차량 확정 · 32m"
@@ -604,12 +608,22 @@ def render(camera_frame_bgr, camera_name, targets, points=None,
     ego_alerts = []
     for i, tgt in enumerate(targets):
         col = LEVEL_COLOR.get(tgt["level"], KIND_COLOR[tgt["class_name"]])
-        # 경고는 깜빡이고 주의는 정적으로 — 단계 차이가 움직임으로도 구분된다
-        ego_alerts.append((tgt["theta"], col,
-                           alert_period(tgt["distance"], tgt["blind"])
-                           if tgt["level"] == "경고" else None))
         kind = GLYPH_KIND[tgt["class_name"]]
         theta = tgt["theta"]
+
+        # theta가 None = 젯슨이 방향을 못 믿겠다고 한 경우. 방향을 나타내는 표현
+        # (부채꼴·클러스터·자차 호·배너 화살표)을 **하나도 그리지 않는다**.
+        # 화면 중앙에 종류와 단계만 띄워, 있는 것만 알리고 없는 것은 지어내지 않는다.
+        if theta is None:
+            _glyph(img, kind, CX, CY - _px(120), 0.72 * TEXT_SCALE, col)
+            text.add(tgt.get("detail") or "방향 미확정", (CX, CY - _px(66)),
+                     _ts(26), col, anchor="mm")
+            continue
+
+        # 경고는 깜빡이고 주의는 정적으로 — 단계 차이가 움직임으로도 구분된다
+        ego_alerts.append((theta, col,
+                           alert_period(tgt["distance"], tgt["blind"])
+                           if tgt["level"] == "경고" else None))
         if tgt["blind"]:
             draw_blind(img, theta)
             gx, gy = to_px(theta, BLIND_M * 0.75)

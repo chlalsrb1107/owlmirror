@@ -52,10 +52,15 @@ HORN_REPEAT_WINDOW_SEC = 12.0   # 이 시간 안에
 HORN_REPEAT_ANGLE_DEG = 40.0    # 이 각도 안에서
 HORN_REPEAT_COUNT = 2           # 이 횟수 이상 울리면 경고로 승격
 
-# ---- 오토바이 --------------------------------------------------------------------
-MOTO_LOUD_DB = -26.0        # ⚠️ 미보정. 이보다 커지면 "가까워지고 있다"고 본다.
-# 분류기가 이미 오토바이로 판정한 뒤에 보는 값이라, 여기서는 음량만 본다
-# (트럭·풍절음 걸러내기는 젯슨 쪽 min_score가 담당).
+# ---- 근접 판정 (세 클래스 공통, 2026-09-02 통일) --------------------------------
+# 소리가 아주 크면 음원이 바로 옆에 있다는 뜻이고, 그 거리대(반경 6m)는 하필 라이다가
+# 못 보는 구간이다. 클래스마다 다르게 둘 이유가 없어 하나로 합쳤다.
+#   · 라이다를 쓰는 클래스(사이렌·오토바이): 6m 이내 관측 → 사각지대
+#   · 세 클래스 전부: 음량이 이 값을 넘으면 → 사각지대 근접으로 간주
+# ⚠️ 미보정 추정치. rms_db는 절대 음압이 아니라 마이크 입력 기준 상대값이라 차량·마운트·
+#    주행 소음에서 반드시 다시 맞춰야 한다.
+LOUD_NEAR_DB = -26.0
+MOTO_LOUD_DB = LOUD_NEAR_DB  # 이름 호환용 (기존 참조가 있을 수 있어 남겨둔다)
 
 
 def _angle_close(a: float, b: float, margin_deg: float) -> bool:
@@ -74,6 +79,12 @@ class AlertPolicy:
         self._horn_at = 0.0          # 그 경적을 채택한 시각
         self._horn_history = []      # [(시각, 방향)] — 반복 판정용
 
+    # ---- 공통 ---------------------------------------------------------------
+    @staticmethod
+    def is_near(rms_db: float) -> bool:
+        """음량만으로 "바로 옆"을 판정. 라이다·카메라가 못 보는 근접 구간을 소리로 메운다."""
+        return rms_db >= LOUD_NEAR_DB
+
     # ---- 경적 ---------------------------------------------------------------
     def horn_accepts(self, theta: float, rms_db: float, now: float = None) -> bool:
         """이 경적이 배너를 차지해야 하는가.
@@ -90,7 +101,10 @@ class AlertPolicy:
         return True
 
     def horn_level(self, theta: float, rms_db: float, now: float = None):
-        """경적을 채택하고 (level, repeats)를 돌려준다. horn_accepts()가 True일 때만 호출할 것."""
+        """경적을 채택하고 (level, repeats, near)를 돌려준다.
+
+        horn_accepts()가 True일 때만 호출할 것. near는 음량 기준 근접(사각지대) 여부다.
+        """
         now = time.time() if now is None else now
         self._horn_theta, self._horn_db, self._horn_at = theta, rms_db, now
 
@@ -99,18 +113,23 @@ class AlertPolicy:
         self._horn_history.append((now, theta))
         repeats = sum(1 for _, a in self._horn_history
                       if _angle_close(a, theta, HORN_REPEAT_ANGLE_DEG))
-        # 같은 방향에서 두 번째 — 지나가는 신호가 아니라 나를 향한 것으로 본다
-        return ("경고" if repeats >= HORN_REPEAT_COUNT else "주의"), repeats
+        near = AlertPolicy.is_near(rms_db)
+        # 같은 방향에서 두 번째면 나를 향한 신호로 보고, 아주 가까우면 그것만으로도 경고.
+        level = "경고" if (repeats >= HORN_REPEAT_COUNT or near) else "주의"
+        return level, repeats, near
 
     # ---- 사이렌 -------------------------------------------------------------
     @staticmethod
-    def siren_level(match):
-        """긴급차량은 위치 확정 여부와 무관하게 항상 경고. 확정되면 거리가 붙을 뿐이다."""
-        if match is None:
-            return "경고", None, False
-        if match["blind"]:
+    def siren_level(match, rms_db: float = -99.0):
+        """긴급차량은 위치 확정 여부와 무관하게 항상 경고. 확정되면 거리가 붙을 뿐이다.
+
+        라이다가 6m 이내에서 잡거나 소리가 아주 크면 사각지대(blind)로 표시한다.
+        """
+        if match is not None and match["blind"]:
             return "경고", None, True
-        return "경고", match["distance_m"], False
+        if match is not None:
+            return "경고", match["distance_m"], False
+        return "경고", None, AlertPolicy.is_near(rms_db)
 
     # ---- 오토바이 -----------------------------------------------------------
     @staticmethod
@@ -121,10 +140,16 @@ class AlertPolicy:
         라이다는 단계를 정하지 않고 잡힌 대상의 **거리 숫자만** 보탠다.
         """
         if detected:
-            # 카메라로 확인됐으면 실체가 있는 것 — 경고까지 올리고 위치를 추적해 보여준다
-            distance = match["distance_m"] if match and not match["blind"] else None
+            # 카메라로 확인됐으면 실체가 있는 것 — 경고까지 올리고 위치를 추적해 보여준다.
+            # 라이다가 사각지대로 보고했으면 그 사실도 함께 넘긴다(거리는 못 준다).
+            if match is not None and match["blind"]:
+                return "경고", None, True, "사각지대"
+            distance = match["distance_m"] if match else None
             return "경고", distance, False, "위치 추적"
-        if rms_db >= MOTO_LOUD_DB:
+        if match is not None and match["blind"]:
+            # 눈으로는 못 봤지만 라이다가 6m 이내에서 뭔가 잡았다 — 가장 위험한 구간이다
+            return "경고", None, True, "사각지대"
+        if AlertPolicy.is_near(rms_db):
             # 안 보이는데 소리가 커지고 있다 = 사각지대에서 접근 중.
             # 이 프로젝트의 차별점이 성립하는 경로다.
             return "경고", None, True, "근접"
@@ -139,7 +164,7 @@ def priority_rank(class_name: str, level: str, blind: bool) -> int:
     사이렌이 이제 항상 경고라, 사이렌 안에서는 위치 확정 여부로 순위를 가른다.
     """
     if class_name == "motorcycle" and blind:
-        return 1   # 오토바이 · 사각지대에서 접근 중(소리가 커짐) — 충돌 최임박
+        return 1   # 오토바이 · 사각지대(라이다 실측 또는 소리 근접) — 충돌 최임박
     if class_name == "motorcycle" and level == "경고":
         return 2   # 오토바이 · 영상으로 확인·추적 중
     if class_name == "siren":
@@ -172,23 +197,34 @@ def run_selftest():
     check("래치 후, 작은 경적도 새 사건으로 채택", p.horn_accepts(200, -35, t + 2.0), True)
     check("유지 시간이 끝나면 당연히 채택", p.horn_accepts(200, -50, t + 9.0), True)
 
-    # ── 경적: 같은 방향 반복 → 경고 ────────────────────────────────────────────
+    # ── 경적: 같은 방향 반복 → 경고 (멀리서 울린 경우, -40dB) ──────────────────
     p, t = AlertPolicy(), 2000.0
-    check("경적 1회는 주의", p.horn_level(90, -25, t)[0], "주의")
-    check("같은 방향 2회는 경고", p.horn_level(100, -25, t + 5)[0], "경고")
+    check("경적 1회는 주의", p.horn_level(90, -40, t)[0], "주의")
+    check("같은 방향 2회는 경고", p.horn_level(100, -40, t + 5)[0], "경고")
     p2 = AlertPolicy()
-    p2.horn_level(90, -25, t)
-    check("다른 방향이면 다시 주의", p2.horn_level(200, -25, t + 5)[0], "주의")
+    p2.horn_level(90, -40, t)
+    check("다른 방향이면 다시 주의", p2.horn_level(200, -40, t + 5)[0], "주의")
     p3 = AlertPolicy()
-    p3.horn_level(90, -25, t)
-    check("시간이 지나면 반복으로 안 침", p3.horn_level(90, -25, t + 30)[0], "주의")
+    p3.horn_level(90, -40, t)
+    check("시간이 지나면 반복으로 안 침", p3.horn_level(90, -40, t + 30)[0], "주의")
+
+    # ── 근접 판정은 세 클래스 공통 ─────────────────────────────────────────────
+    p4 = AlertPolicy()
+    lv, _, near = p4.horn_level(90, -18, 3000.0)
+    check("경적도 아주 크면 1회로 경고+근접", (lv, near), ("경고", True))
+    check("사이렌: 라이다 없고 소리 크면 사각지대",
+          AlertPolicy.siren_level(None, -18.0), ("경고", None, True))
+    check("사이렌: 라이다 없고 조용하면 사각지대 아님",
+          AlertPolicy.siren_level(None, -45.0), ("경고", None, False))
+    check("사이렌: 라이다 6m 이내면 사각지대",
+          AlertPolicy.siren_level({"distance_m": None, "blind": True}, -45.0),
+          ("경고", None, True))
 
     # ── 사이렌: 언제나 경고 ────────────────────────────────────────────────────
-    check("사이렌 미확정도 경고", AlertPolicy.siren_level(None), ("경고", None, False))
+    check("사이렌 미확정도 경고", AlertPolicy.siren_level(None, -45.0), ("경고", None, False))
     check("사이렌 확정은 경고+거리",
-          AlertPolicy.siren_level({"distance_m": 32.0, "blind": False}), ("경고", 32.0, False))
-    check("사이렌 사각지대도 경고",
-          AlertPolicy.siren_level({"distance_m": None, "blind": True}), ("경고", None, True))
+          AlertPolicy.siren_level({"distance_m": 32.0, "blind": False}, -45.0),
+          ("경고", 32.0, False))
 
     # ── 오토바이 (상태 3개) ────────────────────────────────────────────────────
     m = AlertPolicy.motorcycle_level
@@ -201,12 +237,16 @@ def run_selftest():
     check("Detection 성공 + 라이다 거리 → 거리까지 표시",
           m({"distance_m": 18.0, "blind": False}, True, -45.0),
           ("경고", 18.0, False, "위치 추적"))
-    check("Detection 성공 + 라이다는 사각 → 거리 없이 추적",
-          m({"distance_m": None, "blind": True}, True, -45.0),
-          ("경고", None, False, "위치 추적"))
+
     check("라이다에 잡혀도 Detection 실패면 단계는 안 올라감",
           m({"distance_m": 12.0, "blind": False}, False, -45.0),
           ("주의", None, False, "사각지대 위험"))
+    check("오토바이: 라이다 6m 이내면 Detection 없어도 경고",
+          m({"distance_m": None, "blind": True}, False, -45.0),
+          ("경고", None, True, "사각지대"))
+    check("오토바이: Detection + 라이다 사각지대",
+          m({"distance_m": None, "blind": True}, True, -45.0),
+          ("경고", None, True, "사각지대"))
 
     # ── 우선순위 ──────────────────────────────────────────────────────────────
     order = [("motorcycle", "경고", True), ("motorcycle", "경고", False), ("siren", "경고", False),

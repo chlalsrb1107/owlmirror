@@ -76,6 +76,45 @@ MOUNT_OFFSET_DEG = 0.0
 #    풍절음·반사로 더 나빠진다. 그래서 실측치보다 보수적으로 잡아 둔다.
 DEFAULT_SIGMA_DEG = 10.0
 
+# ---- DoA 신뢰도 (2026-09-02 추가) ---------------------------------------------
+# ReSpeaker 펌웨어 DoA는 강한 방향성 소리가 없으면 직전 값이나 잡음을 그대로 뱉는다.
+# 실측에서 사이렌이 끊긴 구간에 287·284·289로 안정적이던 값이 222·79로 튀었다.
+# 한 번만 읽으면 그 튄 값이 그대로 화면 방향이 되므로, **수음 구간 안에서 여러 번 읽어**
+# 원형 평균을 쓰고 흩어진 정도로 신뢰 여부를 판정한다.
+DOA_SAMPLES_PER_WINDOW = 8   # 수음 1구간당 DoA 읽기 횟수 (USB 제어전송 1회당 ~1ms)
+DOA_MAX_SPREAD_DEG = 35.0    # 원형 표준편차가 이보다 크면 방향을 믿지 않는다
+DOA_MIN_DB = -42.0           # 이보다 조용하면 방향성 자체가 없다고 본다
+
+# ---- 오경보 차단 (2026-09-02 추가) --------------------------------------------
+# SVM 마진(score)이나 1위-2위 격차(margin)로는 오경보를 거를 수 없다 — 다중클래스 OvR
+# 값이 클래스와 무관하게 늘 4.2 근처라 변별력이 없기 때문(실측 확인).
+# 대신 **음량**은 물리적으로 확실한 근거다: 실제로 들리지 않는 사이렌은 없다.
+# 실측 근거 — 진짜 감지: siren -17~-33dB, motorcycle -26~-35dB.
+#             오경보: 아무 소리 없는 -44dB 구간에서 경적·사이렌이 각 1회 잡힘.
+# 그 사이인 -40dB에 선을 그으면 오경보는 막고 진짜 감지는 남는다.
+# ⚠️ 주행 중에는 배경 소음이 통째로 올라가므로 이 값도 실차에서 다시 맞춰야 한다.
+MIN_ALERT_DB = -40.0
+
+
+def circular_stats(angles_deg):
+    """각도 목록의 (원형 평균, 원형 표준편차). 0/360 경계를 올바르게 처리한다.
+
+    산술 평균을 쓰면 350°와 10°의 평균이 180°(정반대!)가 된다. 단위벡터로 더한 뒤
+    각도를 되찾아야 한다. 표준편차는 벡터 합의 길이 R로 구한다 — R이 1에 가까우면
+    읽은 값들이 한 방향에 모였다는 뜻이고, 0에 가까우면 사방으로 흩어졌다는 뜻이다.
+    """
+    if not angles_deg:
+        return 0.0, 180.0
+    xs = sum(math.cos(math.radians(a)) for a in angles_deg)
+    ys = sum(math.sin(math.radians(a)) for a in angles_deg)
+    n = len(angles_deg)
+    mean = math.degrees(math.atan2(ys, xs)) % 360.0
+    r = math.hypot(xs, ys) / n
+    if r <= 1e-9:
+        return mean, 180.0
+    sd = math.degrees(math.sqrt(max(0.0, -2.0 * math.log(min(1.0, r)))))
+    return mean, sd
+
 
 def softmax_conf(scores):
     """SVM 마진 리스트 → 최고 클래스의 유사 신뢰도(0~1). 보정된 확률이 아님."""
@@ -97,7 +136,7 @@ class Sender:
 
     def send(self, class_name: str, conf: float, score: float,
              theta: float, sigma: float, t_center: float, rms_db: float = -60.0,
-             margin: float = 0.0):
+             margin: float = 0.0, theta_ok: bool = True, raw_class: str = ""):
         packet = {
             "seq": self.seq,
             "t": round(t_center, 3),
@@ -108,6 +147,10 @@ class Sender:
             "sigma": round(sigma, 1),
             "rms_db": round(rms_db, 1),
             "margin": round(margin, 3),
+            "theta_ok": bool(theta_ok),
+            # 진단용: class가 "none"일 때 실제로 1위였던 클래스. 오토바이 배기음이
+            # engine_idling으로 빨려가는지 같은 혼동을 보려면 이 값이 있어야 한다.
+            "raw": raw_class,
         }
         self.sock.sendto(json.dumps(packet).encode("utf-8"), self.addr)
         self.seq += 1
@@ -136,20 +179,24 @@ def run_simulate(sender: Sender, interval: float, verbose: bool):
                     burst_class, burst_left = None, 0
 
             if burst_class is None:
-                pkt = sender.send("none", 0.0, -1.0, 0.0, DEFAULT_SIGMA_DEG, time.time(), -72.0)
+                pkt = sender.send("none", 0.0, -1.0, 0.0, DEFAULT_SIGMA_DEG,
+                                  time.time(), -72.0, 0.0, False, "engine_idling")
             else:
                 theta = (theta + random.uniform(-8, 8)) % 360  # 대상이 조금씩 움직이는 효과
                 score = random.uniform(0.4, 2.2)
                 # 음량도 흩뿌려야 노트북의 "가장 큰 경적", "배기음 크면 경고" 규칙을 실제로 타본다
                 rms_db = random.uniform(-42.0, -14.0)
                 pkt = sender.send(burst_class, softmax_conf([score, 0.0, -0.5, -0.8, -1.0]),
-                                  score, theta, DEFAULT_SIGMA_DEG, time.time(), rms_db)
+                                  score, theta, DEFAULT_SIGMA_DEG, time.time(),
+                                  rms_db, 1.0, True, burst_class)
                 burst_left -= 1
 
             if verbose or pkt["class"] != "none":
                 print(f"  seq={pkt['seq']:5d} class={pkt['class']:11s} "
                       f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f} "
-                      f"rms={pkt['rms_db']:6.1f}dB margin={pkt['margin']:5.2f}")
+                      f"rms={pkt['rms_db']:6.1f}dB sigma={pkt['sigma']:4.1f}"
+                      f" raw={pkt['raw']}"
+                      f"{'' if pkt['theta_ok'] else '  [방향 불신]'}")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\n[simulate] 종료합니다.")
@@ -157,7 +204,7 @@ def run_simulate(sender: Sender, interval: float, verbose: bool):
 
 def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
              mount_offset: float, sigma: float, verbose: bool,
-             svm_path=None, panns_path=None):
+             svm_path=None, panns_path=None, min_db: float = MIN_ALERT_DB):
     """실제 ReSpeaker에서 수음 → 분류 → DoA → 전송.
 
     svm_path/panns_path를 주면 저장소 구조 밖에 있는 가중치도 쓸 수 있다 — 젯슨에는 보통
@@ -252,20 +299,30 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
     try:
         while True:
             t_capture_start = time.time()
-            frames, collected = [], 0
+            frames, collected, doa_samples = [], 0, []
+            chunks_per_doa = max(1, int(n_samples / clf.CHUNK / DOA_SAMPLES_PER_WINDOW))
+            n_chunk = 0
             while collected < n_samples:
                 raw = stream.read(clf.CHUNK, exception_on_overflow=False)
                 chunk = np.frombuffer(raw, dtype=np.int16).reshape(-1, clf.CHANNELS)
                 frames.append(chunk[:, clf.MIC_CHANNEL_INDEX])
                 collected += chunk.shape[0]
+                # 수음하는 동안 DoA를 같이 읽는다 — 분류하는 그 소리의 방향이 된다.
+                if n_chunk % chunks_per_doa == 0:
+                    try:
+                        doa_samples.append(float(tuning.direction))
+                    except Exception:  # noqa: BLE001 — 한 번 실패해도 나머지로 계속한다
+                        pass
+                n_chunk += 1
             # 스펙상 t는 구간의 '중심' 시각 — 수음 시작 + 구간길이/2
             t_center = t_capture_start + seconds / 2.0
 
-            # ⚠️ DoA는 **분류 전에**, 수음이 끝나자마자 읽는다.
-            #    예전에는 분류 뒤에 읽었는데(주석엔 "소리가 아직 나고 있을 때"라고 썼지만)
-            #    실제로는 캡처 시작 +3.2초 시점이라 소리가 이미 끊긴 뒤였다.
-            #    2026-09-02 실측에서 사이렌인데 theta가 255/351/126/308...로 흩어진 원인.
-            theta = to_vehicle_frame(tuning.direction, mount_offset)
+            # 수음 구간 안에서 모은 DoA로 방향과 그 불확실성을 함께 구한다.
+            raw_theta, spread = circular_stats(doa_samples)
+            theta = to_vehicle_frame(raw_theta, mount_offset)
+            # sigma를 고정값이 아니라 **실측 흩어짐**으로 보낸다 — 노트북 BEV 부채꼴이
+            # 불확실할 때 저절로 넓어지고 확실할 때 좁아진다. 정직한 표현이 된다.
+            sigma_out = max(sigma, min(spread, 60.0))
 
             mono = np.concatenate(frames)[:n_samples].astype(np.float32) / 32768.0
             # dBFS. 완전 무음이면 log(0)이 되므로 바닥을 -90dB로 깐다.
@@ -280,19 +337,29 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
             #    변별력은 1위와 2위의 **격차**에만 남아 있으므로 그것을 따로 보낸다.
             margin = top_score - results[1][1] if len(results) > 1 else 0.0
 
-            if top_class in ALERT_CLASSES and top_score >= min_score:
-                pkt = sender.send(top_class, conf, top_score, theta, sigma, t_center,
-                                  rms_db, margin)
+            # 방향을 믿을 수 있는가 — 읽은 값들이 모였고(spread), 소리가 있었나(rms).
+            # 둘 중 하나라도 못 미치면 theta_ok=False로 보내고, 노트북은 그 방향으로
+            # 카메라를 돌리지 않는다. "잘못된 지목은 알려주지 않는 것보다 위험하다".
+            theta_ok = spread <= DOA_MAX_SPREAD_DEG and rms_db >= DOA_MIN_DB
+
+            # 너무 조용하면 무엇이 잡혔든 내보내지 않는다. 들리지 않는 소리를 알릴 수는 없다.
+            loud_enough = rms_db >= min_db
+
+            if top_class in ALERT_CLASSES and top_score >= min_score and loud_enough:
+                pkt = sender.send(top_class, conf, top_score, theta, sigma_out, t_center,
+                                  rms_db, margin, theta_ok, top_class)
             else:
                 # 배경음이거나 마진 미달 — 방향은 의미 없으므로 0으로 보낸다
-                pkt = sender.send("none", conf, top_score, 0.0, sigma, t_center,
-                                  rms_db, margin)
+                pkt = sender.send("none", conf, top_score, 0.0, sigma_out, t_center,
+                                  rms_db, margin, False, top_class)
 
             cycles += 1
             if verbose or pkt["class"] != "none":
                 print(f"  seq={pkt['seq']:5d} class={pkt['class']:11s} "
                       f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f} "
-                      f"rms={pkt['rms_db']:6.1f}dB margin={pkt['margin']:5.2f}")
+                      f"rms={pkt['rms_db']:6.1f}dB sigma={pkt['sigma']:4.1f}"
+                      f" raw={pkt['raw']}"
+                      f"{'' if pkt['theta_ok'] else '  [방향 불신]'}")
 
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -324,6 +391,9 @@ def main():
     # 추론이 느린 게 아니라 이 sleep이 원인이었다 — 0으로 두면 1.22초까지 당겨진다.
     parser.add_argument("--interval", type=float, default=0.0,
                         help="전송 주기(초). 스펙은 0.25지만 CPU 추론 속도에 따라 조정")
+    parser.add_argument("--min-db", type=float, default=MIN_ALERT_DB,
+                        help="이 음량(dBFS) 아래로는 감지를 내보내지 않는다 — 조용할 때 나오는 "
+                             "오경보 차단용. 주행 중에는 배경 소음이 올라가므로 재조정 필요")
     parser.add_argument("--min-score", type=float, default=0.0,
                         help="이 SVM 마진 미만이면 none으로 보냄 (기본 0.0 = 기존 동작 유지)")
     parser.add_argument("--mount-offset", type=float, default=MOUNT_OFFSET_DEG,
@@ -346,7 +416,7 @@ def main():
         else:
             run_live(sender, args.seconds, args.interval, args.min_score,
                      args.mount_offset, args.sigma, args.verbose,
-                     args.svm_path, args.panns_path)
+                     args.svm_path, args.panns_path, args.min_db)
     finally:
         sender.close()
 
