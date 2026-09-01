@@ -70,8 +70,13 @@
 │   ├── bev_mockup.html           ← 인터랙티브 BEV 목업 (브라우저로 열람)
 │   └── 영상_파이프라인.md        ← 카메라 영상을 BEV UI에 보조 화면(PIP)으로 통합하는 방식
 │
-└── 07_System_Integration/
-    └── 전체_시스템_통합.md       ← Jetson/노트북 분리 구조, ROS2 노드·토픽 구성
+├── 07_System_Integration/
+│   └── 전체_시스템_통합.md       ← Jetson/노트북 분리 구조, ROS2 노드·토픽 구성
+│
+└── 08_Video_Demo/                ← ⚠️ 최종 구현과 거의 동일(카메라 4대+LiDAR), 방향추정만 펌웨어 DoA로 대체한 9/8 한이음 영상 제출 전용 구현 (2026-08-31 갱신)
+    ├── README.md                 ← 카메라 4대 + LiDAR 거리매칭 + 펌웨어 DoA 구성, 파이프라인, 미완료 항목
+    ├── code/doa_camera_select.py, lidar_distance_match.py, live_demo.py ← 펌웨어 DoA→카메라 매핑, LiDAR 거리매칭(신규·미검증), 분류+DoA+Detection+LiDAR 연동 오케스트레이터
+    └── model_outputs/yolo26m_v4_cls05/ ← 구급차·오토바이 시각 Detection 모델(YOLO, 팀원 학습, 가중치 미포함)
 ```
 
 ---
