@@ -1,4 +1,36 @@
-# 08_Video_Demo — 9/8 한이음 영상 제출용 구현
+# 08_Video_Demo — 실제 동작하는 구현
+
+> **(2026-09-02) 이 폴더가 사실상 프로젝트의 실동작 구현이다.** 9/8 영상 제출용으로 시작했으나
+> 최종 아키텍처(카메라 4대+LiDAR+젯슨 분리)와 같아졌고, 실장비로 통합 검증까지 마쳤다.
+> 남은 차이는 방향추정 방식(펌웨어 DoA)뿐이다. 실측치·미해결 문제는 `00_Overview/현재_상태_요약.md`.
+
+## 코드 지도
+
+| 파일 | 역할 |
+|---|---|
+| `code/jetson_audio_sender.py` | **[젯슨]** 수음 → PANNs+SVM 분류 → 펌웨어 DoA(8회 원형평균) → UDP 송신 |
+| `code/audio_receiver.py` | **[노트북]** UDP 수신. 유실·시계 스큐·링크 단절 추적 |
+| `code/alert_policy.py` | 클래스별 알림 규칙(주의/경고 판정). `--selftest` |
+| `code/bev_render.py` | 화면 합성 — BEV\|카메라 반반, 주간/야간 팔레트, 해상도 자동 대응. `--selftest` |
+| `code/live_demo.py` | 오케스트레이터 — 카메라 4대·LiDAR·수신·화면을 엮는다 |
+| `code/lidar_distance_match.py` | VLP-16 수신, 지면 제거, 거리 클러스터링. `--selftest` |
+| `code/doa_camera_select.py` | 펌웨어 DoA 읽기 + 방향→카메라 매핑. `--selftest` |
+| `code/preflight_view.py` | 카메라 4대+LiDAR 사전 점검 뷰어 |
+
+## 실행
+
+```bash
+# 노트북 — 운전자용 외장 디스플레이 전체화면
+python3 code/live_demo.py --fullscreen --monitor HDMI-1-0
+
+# 젯슨 (-u 필수: SSH 파이프에서 stdout이 버퍼링된다)
+python3 -u code/jetson_audio_sender.py --host 192.168.10.1 \
+        --svm-path ~/owlmirror/03_Audio_Classification/model_outputs/panns_svm/best.pt
+```
+
+---
+
+# (이하 9/8 영상 제출 계획 시점 기록)
 
 > ⚠️ (2026-08-31 갱신) 카메라 4대+LiDAR가 촬영일까지 장착·데이터 수신은 가능해져, 8/25에 정했던
 > "카메라 3대·라이다 없음" 축소 구성을 되돌리고 최종 아키텍처(00~07 폴더)와 거의 같은 구성으로
