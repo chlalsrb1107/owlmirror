@@ -59,9 +59,10 @@
     전환되는 카메라 영상을 상시 함께 띄운다. 왼쪽 BEV는 <b>단순화된 마커가 아니라 LiDAR가 실제로 들고
     있는 포인트(점) 단위로 그린다</b> — 성긴 점은 아직 매칭이 안 된 신호(미확정), 촘촘한 색 덩어리는
     `lidar_distance_match.py`의 `MIN_POINTS` 조건을 넘겨 확정된 대상이다.<br>
-    ⚠️ <b>이번 갱신은 목업·설계 문서 범위로 한정한다</b> — `08_Video_Demo/code/live_demo.py`(실제 라이브
-    데모 코드)는 아직 이 레이아웃으로 다시 짜지 않았고, `lidar_distance_match.py` 실물 검증(9/1~9/3
-    일정)과도 별개다. 실제 구현 여부는 9/3 go/no-go 체크포인트 이후 별도로 정한다.</p>
+    <b>(2026-09-02) 이 레이아웃은 실제 코드로 구현됐다</b> — `08_Video_Demo/code/bev_render.py`(신규)가
+    그리기를 전담하고 `live_demo.py`가 상태를 넘긴다. 하드웨어 없이 확인하려면
+    <code>python3 bev_render.py --selftest</code>로 시나리오별 PNG를 뽑을 수 있다. 이 목업은 기준
+    디자인으로 계속 남는다.</p>
   </header>
 
   <div class="grid">

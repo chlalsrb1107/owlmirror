@@ -1,0 +1,5 @@
+// 카메라 4대 + 라이다 연결 확인 GUI 실행
+~/owlmirror_venv/bin/python3 08_Video_Demo/code/preflight_view.py
+
+
+
