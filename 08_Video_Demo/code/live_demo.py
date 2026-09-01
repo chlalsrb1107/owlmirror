@@ -1,10 +1,18 @@
 """
-live_demo.py — 9/8 한이음 영상 제출용 라이브 데모 앱 (2026-08-31 갱신: 카메라 4대+LiDAR 복귀).
+live_demo.py — 9/8 한이음 영상 제출용 라이브 데모 앱 (2026-09-02 갱신: BEV|카메라 반반 화면).
 
-기본은 후방 카메라를 화면에 띄워두고, 소리(경적/사이렌/오토바이)가 감지되면 방향에 맞는 카메라로
-바꾸면서 상단 배너(+사이렌/오토바이는 Detection 박스)를 3초간 띄웠다가 자동으로 후방으로 복귀한다.
-전/좌/우/후방 카메라 4대는 시작할 때 전부 미리 열어(stream_on) 둬서, 전환 시 첫 프레임을 기다리는
-지연이 없다. 화면 레이아웃은 08_Video_Demo/camera_ui_mockup.html의 디자인을 따른다.
+화면을 세로로 반 나눠 **왼쪽은 BEV 원형 지도, 오른쪽은 카메라 영상**을 상시 함께 띄운다
+(08_Video_Demo/camera_ui_mockup.html 목업 그대로). 카메라는 기본이 후방이고, 소리(경적/사이렌/
+오토바이)가 감지되면 방향에 맞는 카메라로 바꾸면서 상단 배너를 3초간 띄웠다가 자동 복귀한다.
+BEV에는 LiDAR가 실제로 들고 있는 포인트를 그대로 그린다 — 매칭 확정 대상은 색 클러스터,
+미확정은 성긴 부채꼴, 6m 이내는 사각 구역 점등. 그리기는 전부 bev_render.py가 맡는다.
+전/좌/우/후방 카메라 4대는 시작할 때 전부 미리 열어(stream_on) 둬서 전환 지연이 없다.
+
+⚠️ (2026-09-02) 이 반반 레이아웃 전환은 09-01까지 "목업만 바꾸고 코드는 9/3 go/no-go 이후에
+   정한다"고 미뤄뒀던 것을, 최종 결과물에 BEV가 반드시 들어가야 한다는 판단으로 앞당겨 구현한
+   것이다. LiDAR가 죽거나 LIDAR_AVAILABLE=False여도 BEV 자체는 계속 그려진다(링·자차·부채꼴은
+   오디오 방향만으로 성립) — 폴백 경로는 그대로 살아 있고, 다만 거리·클러스터가 빠지고
+   좌하단에 "LiDAR 미연결"이 표시된다.
 
 배경: 00_Overview/2026-08-25_9.8_영상제출_촬영_계획.md (2026-08-31 갱신) — 카메라 4대+LiDAR가
 촬영일까지 장착·데이터 수신 가능해져, 8/25에 정했던 "카메라 3대·라이다 없음·모든 감지 주의 캡"
@@ -40,9 +48,9 @@ LiDAR로 방향별 거리를 매칭해 확정된 대상은 ui_state_spec.md 기�
    있어야 동작한다. 클래스는 confusion_matrix.png 기준 Motorcycle/Ambulance 2종.
 ⚠️ CAMERA_CALIB_ID로 방향별 담당 캠 번호(front=4/left=1/right=2/rear=3)를 미리 확정해뒀다 —
    설치 시 이 번호로 캘리브레이션된 물리 카메라를 해당 방향에 붙일 것. 08_Video_Demo/calibration/ 참고.
-⚠️ cv2.putText는 한글을 그리지 못해 Pillow로 한글 폰트를 얹어 그린다(put_text_kr). FONT_PATH가
-   실제 노트북에 있는 한글 폰트 경로를 가리키는지 확인할 것 (우분투는 보통
-   `sudo apt install fonts-nanum` 후 `/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf`).
+⚠️ cv2.putText는 한글을 그리지 못해 Pillow로 얹어 그린다 — 폰트 탐색·텍스트 합성은
+   bev_render.py(FONT_CANDIDATES, TextLayer)로 옮겼다. 한글이 깨지면 그쪽을 볼 것
+   (우분투는 보통 `sudo apt install fonts-nanum`, 기본 Noto CJK로도 동작).
 
 실행 (노트북):
     pip install ultralytics gxipy opencv-python Pillow velodyne-decoder
@@ -53,6 +61,8 @@ LiDAR로 방향별 거리를 매칭해 확정된 대상은 ui_state_spec.md 기�
     #   python3 jetson_audio_sender.py --host <노트북IP>
     # 장비 없이 화면만 검증하려면 노트북에서 직접:
     #   python3 jetson_audio_sender.py --host 127.0.0.1 --simulate
+    # 카메라·라이다도 없이 BEV 레이아웃만 확인하려면:
+    #   python3 bev_render.py --selftest --outdir /tmp/bev
 """
 
 import argparse
@@ -72,41 +82,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audio_receiver import AudioDetectionReceiver, DEFAULT_PORT  # noqa: E402
 from doa_camera_select import select_camera  # noqa: E402
 import lidar_distance_match as lidar  # noqa: E402
+import bev_render  # noqa: E402
+import alert_policy  # noqa: E402
+from alert_policy import AlertPolicy, priority_rank  # noqa: E402
 
 # 경적 포함 3클래스는 카메라 전환까지, 사이렌/오토바이 2개만 시각 Detection까지 실행
 CAMERA_TRIGGER_CLASSES = {"car_horn", "siren", "motorcycle"}
 DETECTION_CLASSES = {"siren", "motorcycle"}
 LIDAR_MATCH_CLASSES = {"siren", "motorcycle"}  # 경적은 거리 추정 대상이 아님 (현재_상태_요약.md 참고)
-CLASS_LABEL_KO = {"car_horn": "경적", "siren": "사이렌", "motorcycle": "오토바이"}
-CAMERA_LABEL_KO = {"front": "전방 카메라", "left": "좌측 카메라", "right": "우측 카메라", "rear": "후방 카메라(기본)"}
-LOC_LABEL_KO = {"front": "전방", "left": "좌측", "right": "우측", "rear": "후방"}
-# BGR (OpenCV) — camera_ui_mockup.html의 종류색(teal/red/violet)과 맞춤
-KIND_COLOR_BGR = {"car_horn": (199, 194, 0), "siren": (48, 59, 255), "motorcycle": (255, 140, 185)}
-# ui_state_spec.md §1 상태 색(BGR) — 이제 "경고"가 실제로 쓰인다 (라이다 거리 확정 시)
-LEVEL_COLOR_BGR = {"주의": (0, 212, 255), "경고": (48, 59, 255)}
+
+# 소리 클래스별로 **기대하는** Detection 라벨. 사이렌인데 Motorcycle이 잡히면 그건 오검출이지
+# 확인이 아니다 — 2026-09-02 실물 테스트에서 사이렌 감지 중 실험실 책상이 "Motorcycle 48%"로
+# 잡혀 화면 전체에 박스가 그려졌다. 클래스가 어긋나면 버린다.
+DETECTION_EXPECT = {"siren": "Ambulance", "motorcycle": "Motorcycle"}
+# YOLO 기본 신뢰도 임계값(0.25)은 데모용으로 너무 낮다. 오검출 박스가 영상에 그대로 남는 쪽이
+# 놓치는 것보다 나쁘다 — 화면은 "확실할 때만" 대상을 지목해야 한다(ui_state_spec.md 원칙).
+# ⚠️ 실차 영상으로 재조정 필요. 너무 높이면 실제 구급차도 놓친다.
+DETECTION_MIN_CONF = 0.55
+# 라벨·색·폰트는 화면을 그리는 쪽(bev_render)에 모아뒀다 — 두 군데에 두면 목업과 어긋난다.
+CLASS_LABEL_KO = bev_render.CLASS_LABEL_KO
+LOC_LABEL_KO = bev_render.LOC_LABEL_KO
 # 창 이름은 ASCII로 — 한글로 두면 Qt 제목표시줄에 "???? - 9/8 ??"로 깨져 나온다.
 WINDOW_NAME = "OwlMirror Demo (9/8)"
-DISPLAY_WIDTH = 1280  # 표시용 가로 크기. 센서 원본 2048은 화면에 너무 크고 그리기도 무겁다.
 
 HOLD_SEC = 3.0  # 마지막 감지 이후 배너/카메라 전환을 유지하는 시간 (ui_state_spec.md "3초 유지" 원칙)
+# 경적만 더 길게 유지한다 — 사이렌·배기음과 달리 한 번 빵 하고 끝나는 소리라, 3초로는
+# 운전자가 화면을 보기 전에 배너가 사라진다. (alert_policy.HORN_HOLD_SEC과 같은 값)
+HOLD_SEC_BY_CLASS = {"car_horn": alert_policy.HORN_HOLD_SEC}
 # 젯슨 패킷 폴링 주기. 젯슨 전송 주기(기본 2초, 스펙 0.25초)보다 충분히 짧게 잡아 전환을 늦추지 않는다.
 POLL_INTERVAL = 0.05
 
-# ui_state_spec.md §5 오토바이 거리 임계값
-MOTORCYCLE_NEAR_M = 15.0   # 이 안쪽이면 "경고"
-MOTORCYCLE_WATCH_M = 25.0  # 15~25m는 "주의"(접근 관찰), 그 밖/미확정은 주의로 캡(안전 폴백)
-
-# 한글 폰트 후보 — 앞에서부터 실제로 존재하는 첫 번째를 쓴다.
-# 특정 경로 하나만 박아두면(예전엔 나눔고딕 고정) 그 패키지가 없는 기기에서 첫 프레임에
-# 바로 OSError로 죽는다. 우분투 기본 설치에 Noto CJK가 들어있어 sudo 없이도 동작한다.
-FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-]
-_font_cache = {}
-_font_path_cache = None
 
 DETECTOR_WEIGHTS = REPO_ROOT / "08_Video_Demo" / "model_outputs" / "yolo26m_v4_cls05" / "weights" / "best.pt"
 
@@ -154,21 +159,6 @@ _lidar_scanner = None
 # 노면에서 라이다 원점까지의 높이(m). 지면 제거 기준이라 이 값이 틀리면 노면이 안 걸러지거나
 # (너무 크면) 실제 차량까지 잘려나간다. ⚠️ 루프랙 장착 후 줄자로 실측해 교체할 것.
 LIDAR_MOUNT_HEIGHT_M = lidar.MOUNT_HEIGHT_M
-
-
-def priority_rank(class_name: str, level: str, blind: bool) -> int:
-    """숫자가 작을수록 우선순위 높음. ui_state_spec.md §2 7단계 표를 이 데모의 3클래스에 맞춘 것."""
-    if class_name == "motorcycle" and blind:
-        return 1  # 오토바이 · 사각지대 진입
-    if class_name == "motorcycle" and level == "경고":
-        return 2  # 오토바이 · 15m 이내 근접
-    if class_name == "siren" and level == "경고":
-        return 3  # 사이렌 · 차량 확정
-    if class_name == "siren":
-        return 4  # 사이렌 · 위치 미확정
-    if class_name == "car_horn":
-        return 5  # 경적
-    return 6  # 오토바이 · 15~25m 접근 (또는 미확정)
 
 
 def load_detector():
@@ -282,8 +272,13 @@ def read_camera_frame(camera: str):
     return frame
 
 
-def run_detection(detector, camera: str):
-    """siren/motorcycle 감지 시 해당 카메라 프레임에서 구급차/오토바이를 찾는다. 없으면 None."""
+def run_detection(detector, camera: str, class_name: str):
+    """siren/motorcycle 감지 시 해당 카메라 프레임에서 구급차/오토바이를 찾는다. 없으면 None.
+
+    box는 **원본 프레임 좌표**(x0,y0,x1,y1)로 돌려준다 — 화면에 넣을 때 bev_render가 표시
+    배율만큼 줄여서 그린다. 이전 버전은 좌표를 버리고 화면 1/3~2/3에 고정 사각형을 그렸는데,
+    그러면 "Ambulance 92%"가 구급차가 아닌 엉뚱한 자리에 붙는다 — 영상에 그대로 남는 거짓말이다.
+    """
     if detector is None:
         return None
     frame = read_camera_frame(camera)
@@ -292,8 +287,23 @@ def run_detection(detector, camera: str):
     result = detector.predict(frame, verbose=False)[0]
     if len(result.boxes) == 0:
         return None
-    box = max(result.boxes, key=lambda b: float(b.conf))
-    return {"label": result.names[int(box.cls)], "conf": float(box.conf)}
+
+    expected = DETECTION_EXPECT.get(class_name)
+    best = None
+    for b in result.boxes:
+        conf = float(b.conf)
+        label = result.names[int(b.cls)]
+        if conf < DETECTION_MIN_CONF:
+            continue
+        if expected is not None and label != expected:
+            continue  # 사이렌인데 Motorcycle 같은 경우 — 확인이 아니라 오검출이다
+        if best is None or conf > float(best.conf):
+            best = b
+    if best is None:
+        return None
+
+    xyxy = [float(v) for v in best.xyxy[0].tolist()]
+    return {"label": result.names[int(best.cls)], "conf": float(best.conf), "box": xyxy}
 
 
 class SharedState:
@@ -312,34 +322,39 @@ class SharedState:
         self.active = {}
 
     def trigger(self, camera: str, class_name: str, loc: str, detection,
-                level: str, distance, blind: bool):
+                level: str, distance, blind: bool, theta: float, sigma: float, detail: str):
         now = time.time()
+        hold = HOLD_SEC_BY_CLASS.get(class_name, HOLD_SEC)
         with self.lock:
             self.active[class_name] = {
-                "camera": camera, "loc": loc, "detection": detection,
-                "level": level, "distance": distance, "blind": blind, "until": now + HOLD_SEC,
+                "class_name": class_name, "camera": camera, "loc": loc, "detection": detection,
+                "level": level, "distance": distance, "blind": blind, "detail": detail,
+                "theta": theta, "sigma": sigma, "until": now + hold,
             }
 
     def snapshot(self):
+        """(표시할 카메라, 우선순위 순 대상 목록, 1위의 detection)을 돌려준다.
+
+        BEV가 들어오면서 반환 형태가 바뀌었다. 이전에는 1위만 배너로 쓰고 나머지는 이름·방향만
+        아이콘으로 넘겼지만, 이제 **모든 대상을 좌표까지 온전히** 넘긴다 — ui_state_spec.md §2
+        "지도는 전부, 알림은 하나"를 지도 없이 아이콘으로 흉내내던 것을 진짜 지도로 대체한 것.
+        """
         now = time.time()
         with self.lock:
             for name in [n for n, v in self.active.items() if now > v["until"]]:
                 del self.active[name]
 
             if not self.active:
-                return "rear", None, None, []
+                return "rear", [], None
 
-            top_name = min(self.active, key=lambda n: priority_rank(n, self.active[n]["level"], self.active[n]["blind"]))
-            top = self.active[top_name]
-            secondary = [{"class_name": n, "loc": v["loc"]}
-                         for n, v in self.active.items() if n != top_name]
-
-            banner = {"class_name": top_name, "loc": top["loc"], "level": top["level"],
-                      "distance": top["distance"], "blind": top["blind"]}
-            return top["camera"], banner, top["detection"], secondary
+            targets = sorted(self.active.values(),
+                             key=lambda v: priority_rank(v["class_name"], v["level"], v["blind"]))
+            targets = [dict(t) for t in targets]  # 락 밖에서 안전하게 쓰도록 복사
+            return targets[0]["camera"], targets, targets[0]["detection"]
 
 
-def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detector):
+def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detector,
+                     policy: AlertPolicy):
     """젯슨에서 온 감지 패킷을 받아 카메라 선택 → Detection → LiDAR 매칭까지 처리한다.
 
     이전 단일 머신 버전의 audio_worker를 대체한다. 수음·분류·DoA 추정이 젯슨으로 넘어갔으므로
@@ -360,171 +375,138 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
 
         top_class = packet["class"]
         if top_class not in CAMERA_TRIGGER_CLASSES:
-            continue  # "none"이거나 배경음 클래스 — 화면은 HOLD_SEC 후 알아서 풀린다
+            continue  # "none"이거나 배경음 클래스 — 화면은 유지시간이 지나면 알아서 풀린다
 
         # ⚠️ 젯슨이 이미 마운트 오프셋을 적용해 차량 좌표계로 보냈다.
         #    여기서 오프셋을 다시 적용하면 이중 적용이 되므로 반드시 0.0으로 호출할 것.
         doa = packet["theta"]
+        rms_db = float(packet.get("rms_db", -60.0))
+        score = float(packet.get("score", 0.0))
+
+        # 경적은 배너를 차지할 자격부터 따진다 — 유지 중인 더 큰 경적을 밀어내지 못하면
+        # 아예 무시한다(래치). 카메라 전환·Detection도 돌리지 않아 헛일을 줄인다.
+        if top_class == "car_horn" and not policy.horn_accepts(doa, rms_db):
+            continue
+
         camera = select_camera(doa, mount_offset_deg=0.0)
-        detection = run_detection(detector, camera) if top_class in DETECTION_CLASSES else None
-        level, distance, blind = classify_level(top_class, doa)
+        detection = (run_detection(detector, camera, top_class)
+                     if top_class in DETECTION_CLASSES else None)
+        level, distance, blind, detail = decide_alert(policy, top_class, doa, detection,
+                                                      rms_db, score)
 
         latency_ms = (time.time() - packet["t"]) * 1000
         print(f"[{time.strftime('%H:%M:%S')}] class={top_class} "
-              f"score={packet.get('score', 0.0):+.3f} theta={doa:.1f} "
+              f"score={score:+.3f} theta={doa:.1f} rms={rms_db:.1f}dB "
               f"(수음~표시 지연 {latency_ms:.0f}ms)")
-        print(f"    -> {camera} 카메라로 전환, level={level}, "
+        print(f"    -> {camera} 카메라로 전환, level={level} ({detail}), "
               f"distance={distance}, blind={blind}, detection={detection}")
-        state.trigger(camera, top_class, LOC_LABEL_KO[camera], detection, level, distance, blind)
+        state.trigger(camera, top_class, LOC_LABEL_KO[camera], detection, level, distance, blind,
+                      theta=doa, sigma=float(packet.get("sigma", 12.0)), detail=detail)
 
 
-def classify_level(class_name: str, doa_deg: float):
-    """클래스+DoA로 (level, distance_m|None, blind)를 정한다.
-
-    경적은 거리 추정 대상이 아니라 항상 "주의". 사이렌/오토바이는 LIDAR_AVAILABLE이고 매칭이
-    성공하면 ui_state_spec.md §5/§7 기준으로 "경고"까지 올리고, 매칭 실패(장비 문제 포함)면
-    8/25 축소 버전과 동일하게 "주의"로 캡한다 — 없는 정확도를 있는 척하지 않기 위한 안전 폴백.
-    """
-    if class_name not in LIDAR_MATCH_CLASSES or not LIDAR_AVAILABLE:
-        return "주의", None, False
-
+def lidar_match(doa_deg: float):
+    """그 방향의 LiDAR 매칭 결과. 라이다를 쓸 수 없으면 None (= 위치 미확정과 같은 취급)."""
+    if not LIDAR_AVAILABLE or _lidar_scanner is None:
+        return None
     # start()가 성공했다는 것만으로는 수신 스레드가 살아있다는 보장이 안 된다 —
     # 스레드가 죽으면 latest_points()가 계속 옛 스캔을 돌려줘서 거리가 멈춘 채로 표시된다.
     if not _lidar_scanner.healthy():
-        return "주의", None, False
+        return None
+    return lidar.match_distance(_lidar_scanner.latest_points(), doa_deg,
+                                mount_height_m=LIDAR_MOUNT_HEIGHT_M)
 
-    points = _lidar_scanner.latest_points()
-    match = lidar.match_distance(points, doa_deg, mount_height_m=LIDAR_MOUNT_HEIGHT_M)
-    if match is None:
-        return "주의", None, False  # 관측 안 됨(위치 미확정) — 안전 폴백
-    if match["blind"]:
-        return "경고", None, True  # 반경 6m 사각지대 — 거리 숫자 없이 경고
 
-    distance = match["distance_m"]
+def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection,
+                 rms_db: float, score: float):
+    """(level, distance, blind, detail)을 정한다. 규칙 자체는 alert_policy.py에 있다.
+
+    detail은 배너 오른쪽에 붙는 짧은 문구다 — 왜 이 단계가 됐는지를 운전자가 읽을 수 있게
+    하려는 것. "경고 → 좌측 · 사각지대 추정"처럼 근거를 같이 보여준다.
+
+    ⚠️ 라이다를 못 쓰면 match가 None이 되는데, 클래스마다 그 뜻이 다르다. 사이렌은 원래
+       거리와 무관하게 경고라 영향이 없고, 오토바이는 Detection·배기음 경로로 넘어가며,
+       경적은 애초에 라이다를 쓰지 않는다. 그래서 예전처럼 "라이다 없으면 전부 주의로 캡"
+       하지 않는다 — 그 캡은 모든 판정이 거리에 매여 있던 시절의 폴백이었다.
+    """
+    if class_name == "car_horn":
+        level, repeats = policy.horn_level(doa_deg, rms_db)
+        detail = f"반복 {repeats}회" if level == "경고" else "방향 안내"
+        return level, None, False, detail
+
+    match = lidar_match(doa_deg) if class_name in LIDAR_MATCH_CLASSES else None
+
     if class_name == "siren":
-        return "경고", distance, False  # 차량 확정
-    # motorcycle
-    if distance < MOTORCYCLE_NEAR_M:
-        return "경고", distance, False
-    if distance < MOTORCYCLE_WATCH_M:
-        return "주의", distance, False
-    return "주의", distance, False  # 멀리 있음 — 이미 감지는 됐으니 안내는 유지, 상향은 안 함
-
-
-def resolve_font_path():
-    """존재하는 첫 한글 폰트 경로. 하나도 없으면 명확한 안내와 함께 예외."""
-    global _font_path_cache
-    if _font_path_cache is None:
-        for candidate in FONT_CANDIDATES:
-            if Path(candidate).exists():
-                _font_path_cache = candidate
-                break
+        level, distance, blind = policy.siren_level(match)
+        if blind:
+            detail = "사각지대"
+        elif distance is not None:
+            detail = "차량 확정"
         else:
-            raise FileNotFoundError(
-                "한글 폰트를 찾을 수 없습니다. `sudo apt install fonts-nanum` 후 다시 실행하거나 "
-                "FONT_CANDIDATES에 실제 경로를 추가하세요.")
-    return _font_path_cache
+            detail = "위치 미확정"
+        return level, distance, blind, detail
+
+    # motorcycle — 잡았나(경고·추적) / 가까워지나(경고·근접) / 모르나(주의) 셋뿐이다
+    return policy.motorcycle_level(match, detection is not None, rms_db)
 
 
-def _font(size: int):
-    from PIL import ImageFont
+def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None,
+               snapshot_dir=None, frames=0):
+    """메인 스레드 표시 루프 — 왼쪽 BEV | 오른쪽 카메라 반반 화면을 매 프레임 합성한다.
 
-    if size not in _font_cache:
-        _font_cache[size] = ImageFont.truetype(resolve_font_path(), size)
-    return _font_cache[size]
-
-
-def put_text_kr(frame_bgr, text: str, org, size: int, color_bgr):
-    """cv2.putText는 한글을 못 그려서 Pillow로 얹어 그린다."""
-    import cv2
-    from PIL import Image, ImageDraw
-
-    img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-    ImageDraw.Draw(img).text(org, text, font=_font(size),
-                              fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
-    frame_bgr[:] = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-
-
-def draw_secondary_icons(frame_bgr, secondary):
-    """메인 배너를 차지하지 못한(우선순위가 낮은) 동시 감지들을 우측 상단에 작은 아이콘+방향으로 표시."""
+    (2026-09-02) camera_ui_mockup.html의 반반 레이아웃을 실제 화면으로 구현. 이전에는 카메라
+    프레임 위에 배너·아이콘만 얹었고 BEV는 목업에만 있었다. 그리기 자체는 bev_render.render()가
+    전담하고 여기서는 최신 상태(감지 목록 / 카메라 프레임 / LiDAR 포인트)를 모아 넘기기만 한다.
+    """
     import cv2
 
-    w = frame_bgr.shape[1]
-    y = 24
-    for item in secondary:
-        col = KIND_COLOR_BGR[item["class_name"]]
-        cx, cy = w - 46, y + 20
-        cv2.circle(frame_bgr, (cx, cy), 18, col, -1)
-        label = f"{CLASS_LABEL_KO[item['class_name']]} · {item['loc']}"
-        put_text_kr(frame_bgr, label, (w - 300, y + 6), 22, (230, 230, 230))
-        y += 46
-
-
-def draw_overlay(frame_bgr, camera: str, banner, detection, secondary, link=None):
-    import cv2
-
-    h, w = frame_bgr.shape[:2]
-    put_text_kr(frame_bgr, CAMERA_LABEL_KO[camera], (24, h - 48), 26, (200, 200, 200))
-    draw_secondary_icons(frame_bgr, secondary)
-
-    # 링크가 끊겼는데 화면이 평소와 똑같아 보이면 "소리가 없다"로 오해하게 된다 — 명시적으로 알린다.
-    if link is not None and not link["connected"]:
-        put_text_kr(frame_bgr, "젯슨 연결 끊김 — 오디오 감지 없음", (24, h - 84), 26, (60, 60, 255))
-
-    if banner is not None:
-        col = KIND_COLOR_BGR[banner["class_name"]]
-        level_col = LEVEL_COLOR_BGR[banner["level"]]
-
-        if banner["level"] == "경고":  # ui_state_spec.md §5 "테두리 빛" — 정적 근사(애니메이션 생략)
-            cv2.rectangle(frame_bgr, (6, 6), (w - 6, h - 6), level_col, 10)
-
-        cv2.rectangle(frame_bgr, (24, 24), (24 + 320, 24 + 90), col, -1)
-        put_text_kr(frame_bgr, CLASS_LABEL_KO[banner["class_name"]], (40, 42), 34, (10, 10, 10))
-        if banner["blind"]:
-            loc_text = f"{banner['level']} → {banner['loc']} · 사각지대"
-        elif banner["distance"] is not None:
-            loc_text = f"{banner['level']} → {banner['loc']} · {banner['distance']:.0f}m"
-        else:
-            loc_text = f"{banner['level']} → {banner['loc']}"
-        put_text_kr(frame_bgr, loc_text, (24 + 332, 46), 26, level_col)
-
-        if detection is not None:
-            x0, y0, x1, y1 = w // 3, h // 4, w * 2 // 3, h * 3 // 4
-            cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), col, 3)
-            tag = f"{detection['label']} {round(detection['conf'] * 100)}%"
-            cv2.rectangle(frame_bgr, (x0, y0 - 36), (x0 + 220, y0), col, -1)
-            cv2.putText(frame_bgr, tag, (x0 + 10, y0 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (10, 10, 10), 2, cv2.LINE_AA)
-
-
-def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None):
-    import cv2
-
-    # 창을 명시적으로 만들고 크기를 지정한다. 안 하면 OpenCV/Qt가 744x332 같은 엉뚱한 크기로
-    # 띄워서, 다른 창 뒤에 묻히면 사용자는 "아무것도 안 뜬다"고 느끼게 된다.
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, DISPLAY_WIDTH, int(DISPLAY_WIDTH * 1200 / 2048))
-    print(f"[*] 화면 표시 시작 — '{WINDOW_NAME}' 창에서 q 누르면 종료")
-    print("[*] 창이 안 보이면 다른 창에 가려진 것입니다 (Alt+Tab으로 전환)")
+    # snapshot_dir이 있으면 창을 띄우지 않고 프레임을 파일로 남긴다. 화면 없는 환경(SSH,
+    # 헤드리스)에서 파이프라인 전체를 점검하거나, 영상 편집용 스틸을 뽑을 때 쓴다.
+    saving = snapshot_dir is not None
+    if saving:
+        snapshot_dir = Path(snapshot_dir)
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[*] 스냅샷 모드 — {frames}장을 {snapshot_dir}에 저장하고 종료합니다")
+    else:
+        # 창을 명시적으로 만들고 크기를 지정한다. 안 하면 OpenCV/Qt가 744x332 같은 엉뚱한
+        # 크기로 띄워서, 다른 창 뒤에 묻히면 사용자는 "아무것도 안 뜬다"고 느끼게 된다.
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_NAME, bev_render.CANVAS_W, bev_render.CANVAS_H)
+        print(f"[*] 화면 표시 시작 — '{WINDOW_NAME}' 창에서 q 누르면 종료")
+        print("[*] 창이 안 보이면 다른 창에 가려진 것입니다 (Alt+Tab으로 전환)")
+    saved = 0
     while True:
-        camera, banner, detection, secondary = state.snapshot()
+        camera, targets, detection = state.snapshot()
         frame = read_camera_frame(camera)
         if frame is None:
             time.sleep(0.05)
             continue
 
-        link = receiver.link() if receiver is not None else None
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        # 표시용으로 먼저 줄인 뒤 오버레이를 그린다 (반대로 하면 글자까지 축소돼 안 읽힌다).
-        # 2048x1200을 그대로 띄우면 화면을 넘기도 하고 그리는 비용도 크다.
-        if frame_bgr.shape[1] != DISPLAY_WIDTH:
-            h = int(frame_bgr.shape[0] * DISPLAY_WIDTH / frame_bgr.shape[1])
-            frame_bgr = cv2.resize(frame_bgr, (DISPLAY_WIDTH, h))
-        draw_overlay(frame_bgr, camera, banner, detection, secondary, link)
-        cv2.imshow(WINDOW_NAME, frame_bgr)
+        # LiDAR는 살아있을 때만 포인트를 넘긴다. 죽은 스캐너가 들고 있는 옛 스캔을 그대로
+        # 그리면 지도가 몇 초 전 세상을 보여주면서도 멀쩡해 보인다.
+        lidar_ok = LIDAR_AVAILABLE and _lidar_scanner is not None and _lidar_scanner.healthy()
+        points = _lidar_scanner.latest_points() if lidar_ok else None
+
+        canvas = bev_render.render(
+            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), camera, targets, points,
+            lidar_ok=lidar_ok,
+            link=receiver.link() if receiver is not None else None,
+            detection=detection)
+        if saving:
+            label = targets[0]["class_name"] if targets else "idle"
+            path = snapshot_dir / f"{saved:03d}_{label}.png"
+            cv2.imwrite(str(path), canvas)
+            print(f"    저장 {path.name}  (감지 {len(targets)}건)")
+            saved += 1
+            if saved >= frames:
+                break
+            time.sleep(0.8)
+            continue
+
+        cv2.imshow(WINDOW_NAME, canvas)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-    cv2.destroyAllWindows()
+    if not saving:
+        cv2.destroyAllWindows()
 
 
 def parse_args():
@@ -534,6 +516,10 @@ def parse_args():
                         help="젯슨 패킷을 받을 UDP 포트")
     parser.add_argument("--bind", default="0.0.0.0",
                         help="바인드 주소. 이더넷 직결만 받으려면 해당 NIC의 고정 IP를 지정")
+    parser.add_argument("--snapshot", default=None, metavar="DIR",
+                        help="창을 띄우지 않고 합성 프레임을 DIR에 PNG로 저장 (헤드리스 점검용)")
+    parser.add_argument("--frames", type=int, default=8,
+                        help="--snapshot일 때 저장할 장수")
     return parser.parse_args()
 
 
@@ -559,11 +545,12 @@ def main():
 
     state = SharedState()
     worker = threading.Thread(
-        target=detection_worker, args=(state, receiver, detector), daemon=True)
+        target=detection_worker, args=(state, receiver, detector, AlertPolicy()), daemon=True)
     worker.start()
 
     try:
-        video_loop(state, receiver)  # 메인 스레드 — OpenCV 창은 메인 스레드에서 돌려야 안전
+        # 메인 스레드 — OpenCV 창은 메인 스레드에서 돌려야 안전
+        video_loop(state, receiver, snapshot_dir=args.snapshot, frames=args.frames)
     except KeyboardInterrupt:
         pass
     finally:

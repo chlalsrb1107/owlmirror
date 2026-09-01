@@ -17,10 +17,17 @@ jetson_audio_sender.py — [젯슨에서 실행] ReSpeaker 오디오 분류 + Do
 | `score` | SVM decision_function 원시 마진 — 임계값 판단은 이 값으로 할 것    |
 | `theta` | **차량 좌표계** 방위각(전방 0°, 반시계 +) — 마운트 오프셋 적용 완료 |
 | `sigma` | 방향 오차 표준편차(도) — 노트북 BEV 부채꼴 폭(2×sigma)에 사용      |
+| `rms_db`| 분석 구간 ch0의 RMS 음량(dBFS, 무음 -90 ~ 최대 0) — 아래 참고  |
 
 ⚠️ conf에 대하여: SVM이 `probability=False`로 학습돼 진짜 확률을 낼 수 없다
    (03_Audio_Classification/model_outputs/panns_svm/README.md 참고). conf는 마진에
    softmax를 씌운 **유사** 신뢰도이므로 표시용으로만 쓰고, 임계값 판단은 score로 할 것.
+
+⚠️ rms_db에 대하여: 노트북의 알림 규칙 두 가지가 이 값을 쓴다 — (1) 경적이 여러 방향에서
+   동시에 잡히면 **가장 큰 것**을 배너로 올리고, (2) 오토바이가 라이다·카메라 어느 쪽으로도
+   확정되지 않았는데 배기음이 크고 또렷하면 "사각지대 근접"으로 보고 경고까지 올린다
+   (alert_policy.py). ⚠️ 절대 음압(dB SPL)이 아니라 마이크 입력 기준 상대값이라, 차량 장착
+   후 실제 주행 소음에서 임계값(alert_policy.MOTO_LOUD_DB 등)을 반드시 다시 맞춰야 한다.
 
 ⚠️ theta에 대하여: 이 스크립트가 MOUNT_OFFSET_DEG를 이미 적용해 차량 좌표계로 보낸다.
    따라서 노트북 쪽 select_camera()는 반드시 mount_offset_deg=0.0으로 호출해야 한다
@@ -61,9 +68,13 @@ ALERT_CLASSES = {"car_horn", "siren", "motorcycle"}
 # 차량 장착 후 실측 보정 필요: ReSpeaker raw 각도 중 차량 정면(0°)에 해당하는 값.
 MOUNT_OFFSET_DEG = 0.0
 
-# 방향 오차 표준편차(도). 현재_상태_요약.md "위치추정(방향)"의 ±10~20°를 반영한 기본값.
-# GCC-PHAT 교차검증으로 실측되면 그 값으로 교체할 것.
-DEFAULT_SIGMA_DEG = 15.0
+# 방향 오차 표준편차(도) — BEV 부채꼴 폭(2×sigma)에 쓰인다.
+# 2026-09-02 실측: 정지·실내에서 사이렌을 한 자리에 두면 DoA가 σ≈5~7°로 뭉친다
+# (theta 274~289 구간). 문서 추정치 ±10~20°보다 좋다.
+# ⚠️ 다만 이건 **정밀도(흩어짐)**이지 정확도가 아니다 — 274°가 실제 방향과 맞는지는
+#    각도를 아는 위치에서 재봐야 하고(MOUNT_OFFSET_DEG 실측과 같은 작업), 주행 중에는
+#    풍절음·반사로 더 나빠진다. 그래서 실측치보다 보수적으로 잡아 둔다.
+DEFAULT_SIGMA_DEG = 10.0
 
 
 def softmax_conf(scores):
@@ -85,7 +96,8 @@ class Sender:
         self.seq = 0
 
     def send(self, class_name: str, conf: float, score: float,
-             theta: float, sigma: float, t_center: float):
+             theta: float, sigma: float, t_center: float, rms_db: float = -60.0,
+             margin: float = 0.0):
         packet = {
             "seq": self.seq,
             "t": round(t_center, 3),
@@ -94,6 +106,8 @@ class Sender:
             "score": round(score, 3),
             "theta": round(theta, 1),
             "sigma": round(sigma, 1),
+            "rms_db": round(rms_db, 1),
+            "margin": round(margin, 3),
         }
         self.sock.sendto(json.dumps(packet).encode("utf-8"), self.addr)
         self.seq += 1
@@ -122,17 +136,20 @@ def run_simulate(sender: Sender, interval: float, verbose: bool):
                     burst_class, burst_left = None, 0
 
             if burst_class is None:
-                pkt = sender.send("none", 0.0, -1.0, 0.0, DEFAULT_SIGMA_DEG, time.time())
+                pkt = sender.send("none", 0.0, -1.0, 0.0, DEFAULT_SIGMA_DEG, time.time(), -72.0)
             else:
                 theta = (theta + random.uniform(-8, 8)) % 360  # 대상이 조금씩 움직이는 효과
                 score = random.uniform(0.4, 2.2)
+                # 음량도 흩뿌려야 노트북의 "가장 큰 경적", "배기음 크면 경고" 규칙을 실제로 타본다
+                rms_db = random.uniform(-42.0, -14.0)
                 pkt = sender.send(burst_class, softmax_conf([score, 0.0, -0.5, -0.8, -1.0]),
-                                  score, theta, DEFAULT_SIGMA_DEG, time.time())
+                                  score, theta, DEFAULT_SIGMA_DEG, time.time(), rms_db)
                 burst_left -= 1
 
             if verbose or pkt["class"] != "none":
                 print(f"  seq={pkt['seq']:5d} class={pkt['class']:11s} "
-                      f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f}")
+                      f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f} "
+                      f"rms={pkt['rms_db']:6.1f}dB margin={pkt['margin']:5.2f}")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\n[simulate] 종료합니다.")
@@ -147,6 +164,23 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
     저장소 전체가 아니라 파일 몇 개만 올라가므로, 경로를 고정하면 찾지 못한다.
     """
     import numpy as np
+
+    # ⚠️ 의존성을 **모델 로딩 전에** 전부 확인한다. 예전에는 pyusb가 없어도 PANNs 340MB를
+    #    다 읽고 오디오 스트림까지 연 뒤에야 ImportError로 죽었다 — 30초를 버리고 나서야
+    #    "pip install pyusb 하세요"를 알게 되는 셈이라, 촬영 현장에서 치명적이다.
+    missing = []
+    for mod, pkg in (("pyaudio", "pyaudio"), ("usb.core", "pyusb"), ("torch", "torch")):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        print(f"[!] 젯슨에 다음 패키지가 없습니다: {', '.join(missing)}")
+        print(f"    pip3 install {' '.join(missing)}")
+        print("    (pyusb는 ReSpeaker 펌웨어 DoA를 읽는 데 필요합니다. 설치 후에도 "
+              "Access denied가 나면 udev 규칙을 추가해야 합니다 — README 참고)")
+        return
+
     import pyaudio
 
     import realtime_classify as clf
@@ -167,14 +201,50 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
     p = pyaudio.PyAudio()
     device_index = clf.get_respeaker_index(p)
     if device_index is None:
-        print("[!] ReSpeaker 마이크를 찾을 수 없습니다. USB 연결을 확인하세요.")
+        # ⚠️ "못 찾음"의 원인이 둘인데 증상이 같다 — (1) USB에 아예 없거나,
+        #    (2) 앞선 실행이 안 죽고 장치를 잡고 있거나. (2)일 때 ALSA는 장치를 계속
+        #    보여주지만 `Subdevices: 0/1`이 되고, PortAudio는 프로브에 실패해 목록에서
+        #    빼버린다. 2026-09-02에 실제로 (2)로 한참 헤맸다 — 그래서 구분해 알려준다.
+        # 이름은 잡히는데 입력 채널이 0이면 = 다른 프로세스가 점유 중.
+        # ALSA는 계속 장치를 보여주지만 PortAudio가 프로브에 실패해 채널 0으로 보고한다.
+        busy = [p.get_device_info_by_index(i)
+                for i in range(p.get_device_count())
+                if "ReSpeaker" in p.get_device_info_by_index(i).get("name", "")]
+        if busy:
+            print("[!] ReSpeaker가 장치 목록에는 있으나 입력 채널이 0으로 보고됩니다 "
+                  "— 다른 프로세스가 이미 마이크를 잡고 있습니다.")
+            print(f"    ({busy[0].get('name')} · maxInputChannels="
+                  f"{busy[0].get('maxInputChannels')})")
+            print("    해결:  pkill -f jetson_audio_sender.py   후 다시 실행하세요.")
+            print("    ⚠️ SSH 창을 그냥 닫으면 젯슨 쪽 파이썬이 살아남습니다. "
+                  "끝낼 때는 Ctrl+C를 쓰세요.")
+        else:
+            print("[!] ReSpeaker가 입력 장치 목록에 없습니다 — USB에 올라오지 않았습니다.")
+            print("    확인:  lsusb | grep 2886   /   케이블·포트를 바꿔 다시 연결")
+            seen = [p.get_device_info_by_index(i).get("name", "")
+                    for i in range(p.get_device_count())]
+            print(f"    PortAudio가 본 장치: {seen if seen else '(없음)'}")
         p.terminate()
         return
     stream = p.open(format=pyaudio.paInt16, channels=clf.CHANNELS, rate=clf.SR,
                     input=True, input_device_index=device_index,
                     frames_per_buffer=clf.CHUNK)
 
-    tuning = Tuning(find_device())
+    try:
+        tuning = Tuning(find_device())
+        # ⚠️ pyusb는 생성자에서 장치를 열지 않는다 — 첫 ctrl_transfer 때 연다. 그래서 권한
+        #    문제는 Tuning() 이 아니라 한참 뒤 루프 안 tuning.direction에서 터진다.
+        #    여기서 한 번 읽어 그 실패를 앞으로 당겨 온다(값도 첫 방위각으로 바로 확인 가능).
+        probe = tuning.direction
+        print(f"[*] ReSpeaker 펌웨어 DoA 정상 — 현재 방위각 {probe}deg")
+    except Exception as e:  # noqa: BLE001 — USB 권한/장치 문제를 원인과 함께 알려준다
+        print(f"[!] ReSpeaker DoA 인터페이스를 열 수 없습니다: {e}")
+        print("    USB 권한 문제라면 젯슨에서 아래를 실행하고 ReSpeaker를 다시 꽂으세요:")
+        print("      echo 'SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"2886\", MODE=\"0666\"' \\")
+        print("        | sudo tee /etc/udev/rules.d/99-respeaker.rules")
+        print("      sudo udevadm control --reload-rules && sudo udevadm trigger")
+        stream.stop_stream(); stream.close(); p.terminate()
+        return
     n_samples = int(seconds * clf.SR)
     print(f"[*] {sender.addr}로 전송 시작 (목표 주기 {interval:.2f}s). 종료: Ctrl+C\n")
 
@@ -191,24 +261,38 @@ def run_live(sender: Sender, seconds: float, interval: float, min_score: float,
             # 스펙상 t는 구간의 '중심' 시각 — 수음 시작 + 구간길이/2
             t_center = t_capture_start + seconds / 2.0
 
+            # ⚠️ DoA는 **분류 전에**, 수음이 끝나자마자 읽는다.
+            #    예전에는 분류 뒤에 읽었는데(주석엔 "소리가 아직 나고 있을 때"라고 썼지만)
+            #    실제로는 캡처 시작 +3.2초 시점이라 소리가 이미 끊긴 뒤였다.
+            #    2026-09-02 실측에서 사이렌인데 theta가 255/351/126/308...로 흩어진 원인.
+            theta = to_vehicle_frame(tuning.direction, mount_offset)
+
             mono = np.concatenate(frames)[:n_samples].astype(np.float32) / 32768.0
+            # dBFS. 완전 무음이면 log(0)이 되므로 바닥을 -90dB로 깐다.
+            rms_db = 20.0 * math.log10(max(float(np.sqrt(np.mean(mono ** 2))), 10 ** (-90 / 20)))
             results = clf.classify(panns_model, svm, class_names, mono)
             top_class, top_score = results[0]
             conf = softmax_conf([s for _, s in results])
-
-            # DoA는 분류가 끝난 직후 읽는다 — 소리가 아직 나고 있을 때의 방향에 가장 가깝다.
-            theta = to_vehicle_frame(tuning.direction, mount_offset)
+            # ⚠️ top_score는 신뢰도가 아니다. sklearn SVC의 다중클래스 OvR 값은
+            #    "이긴 1:1 대결 수(0~4) + 소수점 보정(<1/3)" 구조라, 확신 있는 예측이면
+            #    클래스와 무관하게 늘 4.2 근처가 나온다(2026-09-02 실측: siren +4.27,
+            #    none +4.23, motorcycle +4.23 — 범위가 완전히 겹침).
+            #    변별력은 1위와 2위의 **격차**에만 남아 있으므로 그것을 따로 보낸다.
+            margin = top_score - results[1][1] if len(results) > 1 else 0.0
 
             if top_class in ALERT_CLASSES and top_score >= min_score:
-                pkt = sender.send(top_class, conf, top_score, theta, sigma, t_center)
+                pkt = sender.send(top_class, conf, top_score, theta, sigma, t_center,
+                                  rms_db, margin)
             else:
                 # 배경음이거나 마진 미달 — 방향은 의미 없으므로 0으로 보낸다
-                pkt = sender.send("none", conf, top_score, 0.0, sigma, t_center)
+                pkt = sender.send("none", conf, top_score, 0.0, sigma, t_center,
+                                  rms_db, margin)
 
             cycles += 1
             if verbose or pkt["class"] != "none":
                 print(f"  seq={pkt['seq']:5d} class={pkt['class']:11s} "
-                      f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f}")
+                      f"score={pkt['score']:+6.2f} theta={pkt['theta']:6.1f} "
+                      f"rms={pkt['rms_db']:6.1f}dB margin={pkt['margin']:5.2f}")
 
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -231,8 +315,14 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", required=True, help="노트북 IP (이더넷 직결 시 고정 IP)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    # ⚠️ 2026-09-02 실측으로 확정한 값. 0.5초로 줄이면 주기는 0.55초로 빨라지지만 사이렌
+    #    검출률이 83% -> 35%로 무너진다. 사이렌은 주파수가 오르내리는 소리라 한 주기가
+    #    1~2초인데 0.5초 창에는 특징이 반밖에 안 담긴다. 초당 감지 횟수는 0.68 vs 0.64로
+    #    사실상 같아서, 검출률이 높은 1.0초가 명백히 낫다(배너가 깜빡이지 않는다).
     parser.add_argument("--seconds", type=float, default=1.0, help="분석 구간 길이(초)")
-    parser.add_argument("--interval", type=float, default=2.0,
+    # 기본값이 2.0이던 시절 실측 주기가 3.19초였다(캡처 1.0 + 추론 0.19 + sleep 2.0).
+    # 추론이 느린 게 아니라 이 sleep이 원인이었다 — 0으로 두면 1.22초까지 당겨진다.
+    parser.add_argument("--interval", type=float, default=0.0,
                         help="전송 주기(초). 스펙은 0.25지만 CPU 추론 속도에 따라 조정")
     parser.add_argument("--min-score", type=float, default=0.0,
                         help="이 SVM 마진 미만이면 none으로 보냄 (기본 0.0 = 기존 동작 유지)")
