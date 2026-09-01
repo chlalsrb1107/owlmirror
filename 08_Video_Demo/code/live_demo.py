@@ -10,8 +10,15 @@ live_demo.py — 9/8 한이음 영상 제출용 라이브 데모 앱 (2026-08-31
 촬영일까지 장착·데이터 수신 가능해져, 8/25에 정했던 "카메라 3대·라이다 없음·모든 감지 주의 캡"
 축소 구성을 되돌린다. 전방은 더 이상 "전방 확인" 텍스트가 아니라 실제 카메라로 표시하고,
 LiDAR로 방향별 거리를 매칭해 확정된 대상은 ui_state_spec.md 기준대로 "경고"(빨강)까지 올린다.
-⚠️ 이 LiDAR 연동(lidar_distance_match.py)은 실물로 검증된 적이 없다 — LIDAR_AVAILABLE로
-   가드해서, 연동 실패 시 8/25 버전과 동일하게 모든 감지를 "주의"로 캡하는 폴백으로 자동 전환한다.
+**(2026-09-01) LiDAR 연동(lidar_distance_match.py)은 노트북에서 실제 VLP-16으로 검증 완료**
+   (해당 파일 상단 참고 — decode API 오류·지면 반사 오탐 등 치명 버그 수정됨). 그래도 촬영 당일
+   케이블링 문제 등에 대비해 LIDAR_AVAILABLE로 계속 가드하며, 연동 실패 시 8/25 버전과 동일하게
+   모든 감지를 "주의"로 캡하는 폴백으로 자동 전환한다.
+⚠️ 단, 이 audio_worker는 pyaudio로 로컬 ReSpeaker를 직접 잡는 단일 기기 구조다.
+   jetson_audio_sender.py(젯슨/노트북 분리, 실장비 UDP 링크 검증 완료 — 아래 실행 섹션 참고)의
+   수신 측(노트북에서 UDP로 분류 결과를 받는 코드)은 아직 이 파일에 통합돼 있지 않다 —
+   9/8 데모를 분리 아키텍처로 찍을지, 이 파일처럼 노트북에 마이크까지 물려 단일 기기로 찍을지
+   팀 결정 필요(00_Overview/현재_상태_요약.md 참고).
 
 구조: 오디오 캡처+분류+DoA는 백그라운드 스레드(audio_worker), 카메라 표시는 메인 스레드(video_loop,
 OpenCV 창은 메인 스레드에서 돌려야 안전)로 분리해 영상 프레임레이트가 오디오 추론 주기(1~2초)에
@@ -22,17 +29,21 @@ lidar_distance_match.LidarScanner가 자체 배경 스레드로 최신 스캔을
    area-scan 카메라)**다. OpenCV의 cv2.VideoCapture로는 열리지 않아 Daheng 공식 파이썬 SDK
    `gxipy`(Galaxy SDK 설치 시 포함, https://www.get-cameras.com/showdownloadcenter 등에서
    드라이버+SDK 배포)로 접근해야 한다.
-⚠️ 카메라 4대(전/좌/우/후방)의 실제 시리얼번호(CAMERA_SERIAL)는 이 저장소에 카메라가 없어
-   자리표시값(빈 문자열)이다. 설치 후 `gx.DeviceManager().update_device_list()`로 확인한
-   시리얼번호로 채울 것 (00_Overview/2026-08-25_9.8_영상제출_촬영_계획.md "사전 점검" 참고).
-   시리얼번호 대신 index로 열 수도 있으나 USB 재연결 시 순서가 바뀔 수 있어 시리얼 고정을 권장.
+**(2026-09-01 실장비 점검 완료)** CAMERA_SERIAL은 실제 4대 동시 열기·프레임 획득까지 확인한
+값으로 채움(front=FHH26070137/left=FHH26070138/right=FHH26070139/rear=FHH26070140). 단 방향
+배정은 캘리브레이션 ID와 sync_cam.py 순서로 "유도"한 값이라, 장착 후 preflight_view.py로 각
+방향에서 손을 흔들어 해당 칸이 반응하는지 물리 검증 필수 — 배선 순서가 어긋나도 코드는 알아채지
+못한다. 카메라 1대(front, FHH26070137)는 TB5 독이 아니라 노트북 본체에 직결돼야 하고, 나머지
+2대(right/rear)는 독 내부 5Gbps 구간을 라이다 이더넷과 공유하므로 프레임레이트를 올리면 라이다
+패킷이 유실될 수 있다.
 ⚠️ Detection 모델(yolo26m_v4_cls05/weights/best.pt)은 gitignore 처리된 파일이라 로컬에 직접
    있어야 동작한다. 클래스는 confusion_matrix.png 기준 Motorcycle/Ambulance 2종.
 ⚠️ CAMERA_CALIB_ID로 방향별 담당 캠 번호(front=4/left=1/right=2/rear=3)를 미리 확정해뒀다 —
    설치 시 이 번호로 캘리브레이션된 물리 카메라를 해당 방향에 붙일 것. 08_Video_Demo/calibration/ 참고.
-⚠️ cv2.putText는 한글을 그리지 못해 Pillow로 한글 폰트를 얹어 그린다(put_text_kr). FONT_PATH가
-   실제 노트북에 있는 한글 폰트 경로를 가리키는지 확인할 것 (우분투는 보통
-   `sudo apt install fonts-nanum` 후 `/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf`).
+⚠️ cv2.putText는 한글을 그리지 못해 Pillow로 한글 폰트를 얹어 그린다(put_text_kr). FONT_PATH
+   하드코딩(나눔고딕)이 미설치 우분투에서 첫 프레임에 OSError로 죽던 문제를 2026-09-01에
+   확인·수정 — resolve_font_path()가 나눔고딕/Noto CJK 후보 경로를 자동 탐색해 없으면 fc-list로
+   찾는다(Noto CJK는 보통 sudo 없이도 이미 깔려 있어 그걸로 동작 확인됨).
 
 실행:
     pip install ultralytics gxipy opencv-python Pillow velodyne-decoder
@@ -72,27 +83,45 @@ HOLD_SEC = 3.0  # 마지막 감지 이후 배너/카메라 전환을 유지하�
 MOTORCYCLE_NEAR_M = 15.0   # 이 안쪽이면 "경고"
 MOTORCYCLE_WATCH_M = 25.0  # 15~25m는 "주의"(접근 관찰), 그 밖/미확정은 주의로 캡(안전 폴백)
 
-FONT_PATH = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"  # TODO: 실제 노트북 폰트 경로 확인
+# 한글 폰트 후보 — 우선순위순. 첫 프레임에서 OSError로 죽는 걸 막기 위해 존재하는 첫 경로를 씀.
+# 전부 없으면 fc-list로 "CJK"가 들어간 폰트를 찾는다(Noto CJK는 sudo 없이도 이미 깔려 있는 경우가 많음).
+FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+]
 _font_cache = {}
+_font_path_cache = None
 
 DETECTOR_WEIGHTS = REPO_ROOT / "08_Video_Demo" / "model_outputs" / "yolo26m_v4_cls05" / "weights" / "best.pt"
 
-# TODO: 설치 시 CAMERA_CALIB_ID에 맞는 물리 카메라(예: left=cam1으로 캘리브레이션된 개체)를
-# gx.DeviceManager().update_device_list()로 확인한 실제 시리얼번호로 채울 것
-# (비어있으면 아래 open_daheng_camera가 index로 폴백)
-CAMERA_SERIAL = {"front": "", "left": "", "right": "", "rear": ""}
+# 2026-09-01 노트북 실장비 점검에서 4대 동시 열기·프레임 획득까지 확인한 실제 시리얼번호.
+# ⚠️ 방향(front/left/right/rear) 배정은 캘리브레이션 ID·sync_cam.py 순서로 "유도"한 값 —
+# 장착 후 preflight_view.py로 물리 검증 필수(어긋나면 여기를 실측대로 재배정).
+CAMERA_SERIAL = {"front": "FHH26070137", "left": "FHH26070138",
+                  "right": "FHH26070139", "rear": "FHH26070140"}
 CAMERA_INDEX_FALLBACK = {"front": 4, "left": 1, "right": 2, "rear": 3}  # gxipy는 index가 1부터 시작
 _camera_handles = {}
+_device_manager = None  # 전역으로 유지 — 지역변수로 두면 GC가 gx_close_lib()를 호출해 카메라가 죽는다
+
+# 2026-09-01 실측: 실내 8ms+게인16dB도 어두웠음(밝기 27~95) — 야외 주간엔 8ms로 충분한 것으로
+# 관측됐으나 촬영 현장에서 최종값 확정 필요. 자동노출이 게인 없이 노출만 올려(최대 223ms 관측)
+# 50km/h에서 3.1m 모션블러가 나던 문제 수정: 노출은 고정하고 게인만 자동으로 보정한다.
+EXPOSURE_TIME_US = 8000  # 8ms, gxipy는 마이크로초 단위
+FRAME_RATE_HZ = 30.0
 
 CALIBRATION_DIR = REPO_ROOT / "08_Video_Demo" / "calibration"
 # 방향별 담당 캠 번호를 미리 확정 — 설치 시 이 번호에 맞는 물리 카메라를 해당 방향에 붙이면 됨.
 CAMERA_CALIB_ID = {"front": 4, "left": 1, "right": 2, "rear": 3}
 _calib_cache = {}
 
-# LiDAR 연동은 실물로 검증된 적이 없어, main()에서 스캐너 시작에 실패하면 이 값을 False로
-# 내려 이후 모든 감지가 8/25 버전과 동일하게 "주의"로만 표시되도록 자동 폴백한다.
+# LiDAR 연동은 2026-09-01 실장비 점검에서 검증됨(아래 참고) — 그래도 촬영 당일 케이블링 문제 등에
+# 대비해, main()에서 스캐너 시작에 실패하면 이 값을 False로 내려 이후 모든 감지가 8/25 버전과
+# 동일하게 "주의"로만 표시되도록 자동 폴백한다.
 LIDAR_AVAILABLE = True
 _lidar_scanner = None
+# 줄자 실측값으로 교체할 것 — lidar_distance_match.py의 지면 필터 기준값(임시 거치대 기준 1.7m).
+LIDAR_MOUNT_HEIGHT_M = 1.7
 
 
 def priority_rank(class_name: str, level: str, blind: bool) -> int:
@@ -119,13 +148,23 @@ def load_detector():
 def open_daheng_camera(camera: str):
     import gxipy as gx
 
-    device_manager = gx.DeviceManager()
-    device_manager.update_device_list()
+    global _device_manager
+    # 2026-09-01 발견: DeviceManager를 지역변수로 두면 함수 리턴 시 GC가 돌면서 gx_close_lib()가
+    # 호출돼 카메라 4대가 열자마자 무효화됐다(NotInitApi -13). 프로세스 전역으로 유지해야 한다.
+    if _device_manager is None:
+        _device_manager = gx.DeviceManager()
+    _device_manager.update_device_list()
     serial = CAMERA_SERIAL[camera]
-    cam = (device_manager.open_device_by_sn(serial) if serial
-           else device_manager.open_device_by_index(CAMERA_INDEX_FALLBACK[camera]))
+    cam = (_device_manager.open_device_by_sn(serial) if serial
+           else _device_manager.open_device_by_index(CAMERA_INDEX_FALLBACK[camera]))
     cam.TriggerMode.set(gx.GxSwitchEntry.OFF)
-    cam.ExposureAuto.set(gx.GxAutoEntry.CONTINUOUS)
+    # 2026-09-01 발견: 자동노출이 게인 없이 노출시간만 올려(최대 223ms 관측, 4.5fps) 50km/h에서
+    # 3.1m 모션블러가 났다 — 노출은 고정하고 게인만 자동으로 보정, 프레임레이트도 상한을 건다.
+    cam.ExposureAuto.set(gx.GxAutoEntry.OFF)
+    cam.ExposureTime.set(EXPOSURE_TIME_US)
+    cam.GainAuto.set(gx.GxAutoEntry.CONTINUOUS)
+    cam.AcquisitionFrameRateMode.set(gx.GxSwitchEntry.ON)
+    cam.AcquisitionFrameRate.set(FRAME_RATE_HZ)
     cam.BalanceWhiteAuto.set(gx.GxAutoEntry.CONTINUOUS)
     cam.stream_on()
     return cam
@@ -269,6 +308,12 @@ def classify_level(class_name: str, doa_deg: float):
     if class_name not in LIDAR_MATCH_CLASSES or not LIDAR_AVAILABLE:
         return "주의", None, False
 
+    if not _lidar_scanner.healthy():
+        # 스캐너 배경 스레드가 죽어 있으면 latest_points()는 마지막 스캔에서 멈춰 있다 —
+        # 조용히 오래된 값을 쓰지 않고 "관측 안 됨"과 동일하게 폴백한다.
+        print(f"[!] LiDAR 스캐너 비정상: {_lidar_scanner.status()}")
+        return "주의", None, False
+
     points = _lidar_scanner.latest_points()
     match = lidar.match_distance(points, doa_deg)
     if match is None:
@@ -287,11 +332,40 @@ def classify_level(class_name: str, doa_deg: float):
     return "주의", distance, False  # 멀리 있음 — 이미 감지는 됐으니 안내는 유지, 상향은 안 함
 
 
+def resolve_font_path() -> str:
+    """한글 폰트 경로를 찾는다 — 고정 경로 하나만 가정하면 미설치 환경에서 첫 프레임에 OSError로
+    죽는다(2026-09-01 발견). 후보 목록을 먼저 보고, 없으면 fc-list로 CJK 폰트를 탐색한다."""
+    global _font_path_cache
+    if _font_path_cache is not None:
+        return _font_path_cache
+
+    for path in FONT_CANDIDATES:
+        if Path(path).exists():
+            _font_path_cache = path
+            return path
+
+    import subprocess
+
+    try:
+        out = subprocess.run(["fc-list"], capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            if "CJK" in line or "Nanum" in line:
+                _font_path_cache = line.split(":")[0].strip()
+                return _font_path_cache
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    raise RuntimeError(
+        "한글 폰트를 찾지 못했습니다. `sudo apt install fonts-noto-cjk` 또는 "
+        "`fonts-nanum` 설치 후 다시 실행하세요."
+    )
+
+
 def _font(size: int):
     from PIL import ImageFont
 
     if size not in _font_cache:
-        _font_cache[size] = ImageFont.truetype(FONT_PATH, size)
+        _font_cache[size] = ImageFont.truetype(resolve_font_path(), size)
     return _font_cache[size]
 
 
@@ -382,12 +456,15 @@ def main():
 
     print("[*] Detection 모델(구급차/오토바이) 로딩 중...")
     detector = load_detector()
+    # 2026-09-01 발견: YOLO 첫 추론에 워밍업 비용이 있어(이후 46~86ms) 실제 첫 사이렌/오토바이
+    # 감지 시 배너가 3.3초 지연됐다 — 기동 시 더미 프레임으로 미리 흡수해 둔다.
+    detector.predict(np.zeros((1200, 2048, 3), dtype=np.uint8), verbose=False)
 
     open_all_cameras()
 
     global LIDAR_AVAILABLE, _lidar_scanner
     try:
-        _lidar_scanner = lidar.LidarScanner()
+        _lidar_scanner = lidar.LidarScanner(mount_height_m=LIDAR_MOUNT_HEIGHT_M)
         _lidar_scanner.start()
         print("[*] LiDAR 스캐너 시작")
     except Exception as e:  # noqa: BLE001 — 실물 미검증 연동이라 실패해도 데모 전체를 죽이지 않음

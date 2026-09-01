@@ -2,8 +2,22 @@
 
 > ⚠️ (2026-08-31 갱신) 카메라 4대+LiDAR가 촬영일까지 장착·데이터 수신은 가능해져, 8/25에 정했던
 > "카메라 3대·라이다 없음" 축소 구성을 되돌리고 최종 아키텍처(00~07 폴더)와 거의 같은 구성으로
-> 이 폴더를 재구성했다. 남은 차이는 방향추정(아래 표)뿐이다. 단, **LiDAR 거리 매칭·4카메라 연동
-> 소프트웨어는 8/31 기준 전혀 검증되지 않았다** — 배경·구현 체크리스트는
+> 이 폴더를 재구성했다. 남은 차이는 방향추정(아래 표)뿐이다.
+>
+> **✅ (2026-09-01 갱신) 노트북에서 카메라 4대·VLP-16·젯슨 직결 실장비 점검 완료.** LiDAR
+> 디코딩, 카메라 4대 동시 열기, 젯슨↔노트북 UDP 링크, 전체 파이프라인(카메라 전환→YOLO→LiDAR
+> 매칭→배너)까지 실제로 동작 확인. 그 과정에서 나온 치명 버그 6건(`decode_packet` 미존재 메서드,
+> `Config(model=)` 문자열 불가, 지면 반사가 항상 최근접으로 잡히던 문제, gxipy `DeviceManager`
+> GC 조기 해제, 자동노출 모션블러, 한글 폰트 미설치 크래시, YOLO 워밍업 지연)는 이 저장소 코드에
+> 수정 반영됨. 상세: `00_Overview/현재_상태_요약.md`의 "2026-09-01 실장비 점검" 절.
+>
+> ⚠️ 단, `code/live_demo.py`의 오디오 캡처는 여전히 이 파일을 실행하는 기기(노트북)에 물린
+> ReSpeaker를 pyaudio로 직접 읽는 **단일 기기 구조**다. 젯슨/노트북을 분리해 `jetson_audio_sender.py`
+> (검증 완료, UDP 유실 0%)가 보내는 결과를 노트북에서 받아 쓰는 통합은 아직 이 파일에 없다 —
+> 9/8 촬영을 어느 구조로 할지 팀 결정 필요.
+>
+> 남은 확인사항(실제 오디오 연결 미검증, 클록 동기화, 촬영일 핫스팟 대역, 차량 장착 시 확인
+> 3건, 사이렌 재현율 68.7% 등)은 배경·구현 체크리스트는
 > `00_Overview/2026-08-25_9.8_영상제출_촬영_계획.md`(2026-08-31 갱신)와
 > `00_Overview/현재_상태_요약.md`.
 
@@ -12,7 +26,7 @@
 | 항목 | 최종 구현 (00~07) | 9/8 데모 (이 폴더) |
 |---|---|---|
 | 카메라 | 4대 (전/후/좌/우) | 4대, 동일 |
-| 거리·차량 확정 | LiDAR | LiDAR, 동일 — **단 연동 코드가 미검증** |
+| 거리·차량 확정 | LiDAR | LiDAR, 동일 — **(2026-09-01) 실장비 검증 완료** |
 | 방향추정(DoA) | ReSpeaker raw ch1~4 + 자체 GCC-PHAT(`04_Sound_Localization/code/gcc_phat.py`, 미보정) | **ReSpeaker 온보드 펌웨어 DoA** (USB Tuning 인터페이스) — 보정 불확실성 리스크 회피 목적으로 8/25에 결정, 유지 |
 | 기본 화면 | BEV 지도 | **카메라 영상이 주화면**, 방향·거리는 상단 알림 배너로 전달 (BEV는 로드맵 컷인으로만 별도 등장) |
 
@@ -52,20 +66,38 @@ ReSpeaker 마이크                              VLP-16 LiDAR
 
 - `camera_ui_mockup.html` — 9/8 데모 UI 목업, **(2026-09-01) BEV(좌)|카메라(우) 반반 레이아웃으로 갱신** — BEV는 LiDAR 포인트 클러스터(확정)·성긴 부채꼴(미확정) 표현 포함, 주의/경고 색 분기 포함. 인터랙티브. ⚠️ 목업일 뿐 `live_demo.py`는 아직 이 레이아웃 미반영
 - `code/doa_camera_select.py` — 펌웨어 DoA 읽기(`Tuning` 클래스) + 방향→카메라 매핑(`select_camera`, 전/좌/후/우 4방향). `--selftest`로 하드웨어 없이 매핑 로직 검증 가능, `--live`는 실제 ReSpeaker 필요.
-- `code/lidar_distance_match.py` — VLP-16 UDP 스트림을 배경 스레드로 읽어(`LidarScanner`) DoA 방향의 가장 가까운 물체까지 거리를 매칭(`match_distance`). 반경 6m 이내(사각지대)는 거리 대신 "사각지대"만 반환. `--selftest`로 가짜 포인트로 매칭 로직 검증 가능, `--live --theta <deg>`는 실제 VLP-16 필요. **실물로 전혀 검증 안 됨** — 파일 상단 "미검증" 목록 참고.
-- `code/live_demo.py` — 실제 라이브 데모 앱. 전/좌/우/후방 카메라 4대를 시작할 때 전부 미리 열어두고(전환 지연 없음), 오디오 분류+DoA는 백그라운드 스레드, LiDAR는 자체 배경 스레드(`LidarScanner`), 카메라 표시는 메인 스레드(OpenCV 창)로 분리해서 소리 감지 시 방향에 맞는 카메라+배너(+사이렌/오토바이는 Detection 박스, +LiDAR 거리 매칭 성공 시 "경고" 빨강 테두리)로 3초간 전환했다가 후방으로 자동 복귀한다(`ui_state_spec.md`의 "3초 유지" 원칙). LiDAR 연동이 시작 시 실패하면 `LIDAR_AVAILABLE=False`로 자동 폴백해 모든 감지를 8/25 버전과 동일하게 "주의"로만 표시한다. 레이아웃은 `camera_ui_mockup.html`을 따름. **카메라 4대는 일반 UVC 웹캠이 아니라 Daheng Imaging MER2-240-159U3C(USB3 Vision 산업용 카메라)**라 `cv2.VideoCapture`가 아니라 Daheng 공식 SDK `gxipy`로 프레임을 읽는다. **실제 시리얼번호는 자리표시값**(아래 참고). 한글 텍스트는 `cv2.putText`가 못 그려서 Pillow+한글 폰트로 그림 — `FONT_PATH`가 실제 노트북 폰트 경로를 가리키는지 확인 필요(우분투는 `sudo apt install fonts-nanum`).
+- `code/lidar_distance_match.py` — VLP-16 UDP 스트림을 배경 스레드로 읽어(`LidarScanner`) DoA 방향의 가장 가까운 물체까지 거리를 매칭(`match_distance`). 반경 6m 이내(사각지대)는 거리 대신 "사각지대"만 반환. z 지면 필터(`filter_ground`, 장착 높이 기준)와 거리축 클러스터링(`MIN_CLUSTER_POINTS`/`CLUSTER_GAP_M`)으로 지면 반사·노이즈를 제거한다. `--selftest`로 가짜 포인트+회귀 테스트(지면 반사 시나리오 포함)로 매칭 로직 검증 가능, `--live --theta <deg> --mount-height <m>`은 실제 VLP-16 필요. **(2026-09-01) 실장비로 검증 완료** — decode API 오류·지면 반사 오탐 등 치명 버그 수정됨. 여전히 미검증인 항목은 파일 상단 참고.
+- `code/live_demo.py` — 실제 라이브 데모 앱. 전/좌/우/후방 카메라 4대를 시작할 때 전부 미리 열어두고(전환 지연 없음), 오디오 분류+DoA는 백그라운드 스레드, LiDAR는 자체 배경 스레드(`LidarScanner`), 카메라 표시는 메인 스레드(OpenCV 창)로 분리해서 소리 감지 시 방향에 맞는 카메라+배너(+사이렌/오토바이는 Detection 박스, +LiDAR 거리 매칭 성공 시 "경고" 빨강 테두리)로 3초간 전환했다가 후방으로 자동 복귀한다(`ui_state_spec.md`의 "3초 유지" 원칙). LiDAR 연동이 시작 시 실패하거나 스캐너가 죽으면(`healthy()`) `LIDAR_AVAILABLE=False`로 자동 폴백해 모든 감지를 8/25 버전과 동일하게 "주의"로만 표시한다. 레이아웃은 `camera_ui_mockup.html`을 따름. **카메라 4대는 일반 UVC 웹캠이 아니라 Daheng Imaging MER2-240-159U3C(USB3 Vision 산업용 카메라)**라 `cv2.VideoCapture`가 아니라 Daheng 공식 SDK `gxipy`로 프레임을 읽는다. **(2026-09-01) 실제 시리얼번호로 4대 동시 열기 검증 완료**(아래 참고, 방향 배정은 장착 후 물리 재검증 필요). 노출은 8ms 고정+자동게인(모션블러 방지), 프레임레이트 30fps 상한. 한글 텍스트는 `cv2.putText`가 못 그려서 Pillow+한글 폰트로 그림 — `resolve_font_path()`가 나눔고딕/Noto CJK를 자동 탐색한다.
 - `model_outputs/yolo26m_v4_cls05/` — 팀원이 학습한 구급차(Ambulance)/오토바이(Motorcycle) YOLO 모델(2026-08-25 저장소 루트에 업로드된 것 정리). 가중치(`.pt`)는 gitignore 처리, 상세는 그 폴더의 README 참고.
 - `calibration/cam1_calib`~`cam4_calib/` — 카메라 4대 각각의 내부 파라미터(camera_matrix, distortion_coefficients) 캘리브레이션 결과(2026-08-25 저장소 루트에 업로드된 것 정리). **방향 매핑 확정: cam1=좌, cam2=우, cam3=후방, cam4=전방** (`live_demo.py`의 `CAMERA_CALIB_ID`) — 설치 시 각 방향에 해당 번호로 캘리브레이션된 물리 카메라를 붙이면 됨.
 
 ## 아직 안 된 것 (팀 확인 필요, 촬영 전 최우선순위 순)
 
-- [ ] **`code/lidar_distance_match.py` 전체가 미검증** — VLP-16 UDP 포트/패킷 포맷, 좌표계→차량 정면 오프셋(`MOUNT_OFFSET_DEG`), 최소 포인트 수·노이즈 필터링 전부 실물 없이 작성함. 실물 장비로 `--live --theta <deg>`부터 확인
-- [ ] `code/live_demo.py`의 4번째 카메라(전방) 연동 확인 — 기존 좌/우/후방 3대는 이미 마운트·캘리브레이션 완료, 전방(cam4)만 신규로 물리 장착·시리얼번호 확인 필요
-- [ ] `DOAANGLE` 레지스터 id(=21)가 실제 이 보드에서 맞는지 `--live`로 검증 (ReSpeaker 공식 참고값이나 실측 안 됨)
-- [ ] `MOUNT_OFFSET_DEG` — 차량에 마이크 장착 후 정면(0°) 기준 보정 (라이다용 오프셋은 별도 값, `lidar_distance_match.py`의 동명 상수 참고)
+**9/3 go/no-go 전 — 즉시 조치**
+- [ ] **실제 오디오 연결 미검증**: 지금까지 전부 `--simulate` 기준 — ReSpeaker+젯슨을 연결하고, 젯슨에 torch/pyaudio/pyusb/scikit-learn 설치, PANNs 사전학습 가중치(340MB, Zenodo) 다운로드 필요. 젯슨 GPU가 인식 안 되면 CPU 추론만 돌아 초당 4회 스펙을 못 맞춘다 — 스크립트 종료 시 실측 주기 출력값으로 판단
+- [ ] 젯슨↔노트북 시계 동기화(chrony/NTP) — 측정 지연이 14.8ms→11.1ms로 단조 감소한 게 관측돼(네트워크 지터로는 설명 안 됨) 두 기기 시계가 서로 다른 속도로 가고 있다는 신호. 라이다 100ms 스캔 내 시각 매칭 정확도가 여기 달려 있음
+- [ ] 촬영일 핫스팟 대역 확인 — 일부 안드로이드 핫스팟은 192.168.1.x를 줘서 VLP-16(192.168.1.201)과 충돌. 아이폰(172.20.10.x)·대부분 안드로이드(192.168.43.x)는 안전. 충돌 시 당일 VLP-16 자체 IP 변경은 어려우니 미리 확인
+
+**차량 장착 시 확인**
+- [ ] 라이다 장착 높이 실측 — `live_demo.py`의 `LIDAR_MOUNT_HEIGHT_M`(현재 임시 거치대 기준 1.7)을 줄자 실측값으로 교체. 틀리면 지면 필터가 노면을 못 거르거나 실제 차량을 잘라낸다
+- [ ] 카메라 방향 배정 물리 검증 — `CAMERA_SERIAL`은 캘리브레이션 ID로 "유도"한 값. `preflight_view.py`로 각 방향에서 손을 흔들어 반응 확인, 어긋나면 `CAMERA_SERIAL` 수정 (⚠️ `preflight_view.py`는 노트북 로컬 브랜치에만 있고 아직 이 저장소에 없음 — 이식 필요)
+- [ ] 클러스터 임계값(`MIN_CLUSTER_POINTS=5`, `CLUSTER_GAP_M=1.0`) 현장 조정 — 원거리 대상은 점이 적어 놓칠 수 있음
+- [ ] 야외 노출값 재확인 — 실내 8ms+게인16dB는 어두웠음(밝기 27~95), 야외 주간엔 8ms로 충분한 것으로 관측됐으나 현장에서 최종값 확정
+- [ ] 카메라 1대(front, FHH26070137)는 TB5 독이 아니라 노트북 본체 직결 — 나머지 2대(right/rear)는 독 내부 5Gbps 구간을 라이다 이더넷과 공유하므로 프레임레이트 올리면 라이다 패킷 유실 가능
+
+**팀 상의 필요**
+- [ ] **사이렌 재현율 68.7%**(5클래스 중 최저, test 혼동행렬 기준) — 응급차량 양보 의무로 우선순위 3위인 핵심 클래스인데 오분류가 전부 비경보 배경 클래스로 몰려 알림이 아예 안 뜬다. 재촬영 여유 또는 판단 규칙 보완 필요
+- [ ] 카메라-라이다 외부 캘리브레이션 사용 불가(Mean Reprojection Error 280px, 관측 5개뿐, RPY 편차 175°=사실상 뒤집힘) — 9/8 데모(각도만 사용)엔 영향 없음, 카메라 영상에 라이다 겹쳐 그리거나 YOLO 융합 시에만 필요하니 재촬영(관측 20개+)은 9/8 이후로 미루는 것 권장
+- [ ] 젯슨/노트북 분리 아키텍처(`jetson_audio_sender.py`, UDP 링크 검증 완료) vs `live_demo.py`의 단일 기기(로컬 ReSpeaker) 구조 중 9/8 촬영에 어느 쪽을 쓸지 결정 — 현재 두 코드가 통합돼 있지 않음
+- [x] ~~`code/lidar_distance_match.py` 전체가 미검증~~ → 2026-09-01 실장비 검증 완료 (decode API·지면 필터 등 치명 버그 6건 수정)
+- [x] ~~`DOAANGLE` 레지스터 id·`MOUNT_OFFSET_DEG`~~ → 별도 확인 필요하나 이번 점검 범위 밖(라이다·카메라·UDP 링크가 우선 검증 대상이었음)
 - [x] ~~카메라 3대 임시 마운트 방법~~ → 좌/우/후방 구매·규격·마운트·캘리브레이션 완료 (2026-08-25)
-- [ ] `live_demo.py`의 `CAMERA_SERIAL`(시리얼번호, 현재 빈 값) — 설치 시 `CAMERA_CALIB_ID`에 맞는 물리 카메라(예: left=cam1 캘리브레이션 개체)의 실제 시리얼번호로 채울 것
-- [ ] `gxipy`(Daheng Galaxy SDK), `velodyne-decoder` 설치 및 카메라·라이다 인식 확인 — 노트북(우분투)에 벤더 드라이버 설치 필요할 수 있음
-- [ ] 한글 폰트 설치 확인(`fonts-nanum` 등) 및 `live_demo.py`의 `FONT_PATH`를 실제 경로로 수정
+- [x] ~~`live_demo.py`의 `CAMERA_SERIAL`(시리얼번호)~~ → 2026-09-01 실제 시리얼로 4대 동시 열기 검증 완료
+- [x] ~~`gxipy`(Daheng Galaxy SDK), `velodyne-decoder` 설치 및 카메라·라이다 인식 확인~~ → 2026-09-01 완료
+- [x] ~~한글 폰트 미설치 시 크래시~~ → `resolve_font_path()` 자동 탐색으로 수정 (2026-09-01)
 - [ ] `yolo26m_v4_cls05`의 베이스 모델(`yolo26m.pt`)이 표준 `ultralytics` 배포판에 있는 이름인지 확인 — 없으면 학습 팀원의 패키지 버전 확인 필요
 - [ ] **폴백 리허설**: LiDAR 연동이 촬영 전날까지도 불안정하면 `LIDAR_AVAILABLE=False`로 강제 고정해 8/25 버전(모든 감지 "주의" 캡)으로 촬영할 수 있는지 최소 한 번은 미리 확인해 둘 것
+
+**환경 제약(건드리면 깨짐)**
+- [ ] 노트북 파이썬 환경 `~/owlmirror_venv`(`--system-site-packages`, ROS2 Humble rclpy 공유) — `numpy==1.26.4`, `opencv-python==4.11`로 고정 필수. `cv_bridge`의 C 확장이 numpy 1.x ABI로 빌드돼 있어 numpy 2.x에서 조용히 깨짐(import는 되고 실제 변환 호출에서야 터짐), `opencv-python` 5.x는 반대로 numpy≥2 요구
+- [ ] 고정 IP는 `nmcli` 프로파일로 설정 (`ip addr add`는 NetworkManager의 DHCP 재시도 실패 시 같이 삭제됨) — 게이트웨이는 넣지 말 것(Wi-Fi 인터넷 끊김)
