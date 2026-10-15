@@ -37,7 +37,46 @@ def select_camera(theta_deg: float) -> str:
 ```
 
 - 방향 오차(sigma)가 커서 경계 부근이면 인접한 두 카메라를 함께 후보로 둘지는 UI 설계(`ui_state_spec.md`의 "부채꼴 표시" 원칙)와 맞춰 결정 필요.
-- 실제 ROS2 구조에서는 이 선택 로직이 `matching_node`(`07_System_Integration/전체_시스템_통합.md` 참고)에서 실행되어, 선택된 카메라의 `/camera_{dir}/image_raw`를 UI가 PIP로 표시한다.
+- 실제 ROS2 구조에서는 이 선택 로직이 `matching_node`(`07_System_Integration/전체_시스템_통합.md` 참고)에서 실행된다. 현재 구현(`08_Video_Demo/code/live_demo.py`)은 ROS2 없이 단일 프로세스로 같은 일을 하고, 선택된 카메라를 **PIP가 아니라 화면 오른쪽 절반에 상시** 표시한다(`ui_state_spec.md` §5).
+
+---
+
+## 역방향 — 박스 → 방위각 (2026-10-15 추가, 최종 파이프라인의 핵심)
+
+방향으로 카메라를 고르는 것(위)이 전반부라면, **카메라가 지목한 대상을 다시 방위각으로 되돌리는
+것**이 후반부다. 이 환산이 있어야 LiDAR에게 "그 물체까지 얼마나 머냐"고 물을 수 있다.
+
+```python
+# 08_Video_Demo/code/camera_bearing.py
+CAMERA_YAW_DEG = {"front": 0.0, "left": 90.0, "rear": 180.0, "right": -90.0}
+
+def bearing_from_pixel(camera, u_px):
+    fx, cx, _ = intrinsics(camera)                  # calibration.json에서
+    angle_in_image = degrees(atan((u_px - cx) / fx))  # 화면 오른쪽이 +
+    return wrap180(camera_yaw_deg(camera) - angle_in_image)
+```
+
+- **부호 주의**: 차량 좌표계는 반시계 +인데 화면 오른쪽은 시계 방향이다. 빼기(`-`)를 빠뜨리면
+  좌우가 통째로 반대가 된다 — `bev_render._screen_angle()`과 같은 종류의 함정이다.
+- 박스 좌우 끝을 각각 환산하면 **대상이 차지하는 각도 폭**이 나온다. 그 폭이 그대로 LiDAR
+  조회 창이 된다(`max(3°, 1.6 × 절반 폭)`, 최대 12°) — 멀리 있어 박스가 작으면 창도 좁아져
+  옆 차선 차량을 집지 않는다.
+- 소리 방향(σ 5~7°, 주행 중 더 나빠짐)으로 조회할 때와의 차이가 이 구조의 요점이다. 창 안에
+  차가 두 대면 소리만으로는 어느 쪽인지 모르지만, 카메라가 경광등을 보고 지목하면 안다.
+
+### 장착 보정 두 가지
+
+| 값 | 의미 | 어디서 |
+|---|---|---|
+| `yaw_trim_deg` | 90° 정배치에서 실제로 틀어진 각도. 30 m에서 2°면 1.05 m 오차 | `config/camera_mount.json` |
+| `hfov_deg` | 수평화각 override. 비우면 `calibration.json`의 fx로 계산 | 같은 파일 |
+
+⚠️ **화각 불일치(2026-10-15 발견)**: 캘리브레이션 fx(≈2069 px / 폭 2048 px)로 계산하면 화각이
+약 **52.7°**인데, 하드웨어 문서에는 **2.8 mm 렌즈(≈103°)**로 적혀 있다. 52.7°가 맞다면 카메라
+4대는 방위를 **37°씩 비워둔다**(합계 149°) — 그 구역의 대상은 YOLO로 지목할 수 없다.
+`python3 08_Video_Demo/code/camera_bearing.py --report`로 현재 설정 기준 커버리지를 볼 수 있고,
+현장에서 아는 방향의 표적으로 확인해 `hfov_deg`를 확정해야 한다. **화각이 틀리면 방위 환산
+자체가 틀리므로**, 거리는 맞는데 엉뚱한 물체의 거리를 집게 된다.
 
 ---
 
@@ -50,3 +89,6 @@ def select_camera(theta_deg: float) -> str:
 ## 위치 미확정 시 표시 원칙
 
 LiDAR 매칭으로 특정 차량을 아직 확정하지 못한 경우, 카메라 선택은 되어도 **지도에는 마커를 찍지 않고 방향(부채꼴)만** 표시한다 — "잘못된 지목은 알려주지 않는 것보다 위험하다"는 UI 원칙(`ui_state_spec.md`)과 일관되게 유지한다.
+
+(2026-10-15) 카메라 영상 쪽에서는 거리 자리를 비워두는 대신 **"거리 확인 중"**이라고 적는다.
+빈 자리는 "거리가 없다"는 뜻으로도, "센서가 못 본다"는 뜻으로도 읽히기 때문이다(`ui_state_spec.md` §4-1).

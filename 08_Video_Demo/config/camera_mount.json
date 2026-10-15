@@ -1,0 +1,16 @@
+{
+  "_note": "카메라 장착 보정. 박스→방위 환산(camera_bearing.py)이 이 값을 쓴다.",
+  "_status": "2026-10-15 — 아직 실측 전. yaw_trim은 90° 정배치 가정(0), hfov는 비워두면 calibration.json의 fx로 계산한다.",
+  "_check": "python3 08_Video_Demo/code/camera_bearing.py --report",
+
+  "_yaw_trim": "방향별 장착 미세 보정(도, 반시계 +). 아는 방향에 표적을 두고 화면 중앙에서 벗어난 만큼 넣는다. 30m에서 2° = 1.05m 오차다.",
+  "yaw_trim_deg": {
+    "front": 0.0,
+    "left": 0.0,
+    "right": 0.0,
+    "rear": 0.0
+  },
+
+  "_hfov": "수평화각 override(도). 비워두면 캘리브레이션 fx로 계산(현재 약 52.7°). ⚠️ 하드웨어 문서에는 2.8mm 렌즈(약 103°)로 적혀 있어 둘이 맞지 않는다 — 현장에서 확인해 실제 값을 넣을 것. 화각이 틀리면 방위 환산 자체가 틀린다.",
+  "hfov_deg": {}
+}

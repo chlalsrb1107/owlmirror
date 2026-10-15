@@ -26,6 +26,7 @@ decide_alert / SharedState)을 그대로 돌리고 가짜 센서만 꽂아서 �
 """
 
 import argparse
+import math
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import camera_bearing  # noqa: E402
 import lidar_distance_match as lidar  # noqa: E402
 import live_demo  # noqa: E402
 from alert_policy import AlertPolicy  # noqa: E402
@@ -51,11 +53,14 @@ class FakeScanner:
     """
 
     def __init__(self, bearing_deg: float, start_m: float, closing_mps: float,
-                 height_m: float = MOUNT_HEIGHT_M):
+                 height_m: float = MOUNT_HEIGHT_M, decoy=None):
         self.bearing_deg = bearing_deg
         self.start_m = start_m
         self.closing_mps = closing_mps
         self.height_m = height_m
+        # decoy=(방위, 거리) — 같은 각도 창 안에 있는 **소리를 내지 않는** 물체(주차 차량).
+        # 카메라가 대상을 지목했을 때 라이다가 이 미끼 대신 지목된 물체를 재는지 보려는 것.
+        self.decoy = decoy
         self.t0 = time.time()
         self._cache = (None, -1)
         self.dead = False
@@ -74,6 +79,9 @@ class FakeScanner:
             pts = lidar._make_road_scene(mount_height_m=self.height_m,
                                          car_range_m=self.truth_distance(now),
                                          car_azimuth_deg=self.bearing_deg)
+            if self.decoy is not None:
+                extra = lidar._vehicle_points(self.decoy[1], self.decoy[0], self.height_m)
+                pts = np.concatenate([pts, np.array(extra, dtype=np.float32)], axis=0)
             self._cache = (pts, scan_id)
         return self._cache[0].copy(), self._cache[1]
 
@@ -128,11 +136,36 @@ class FakeReceiver:
         pass
 
 
+def box_for_bearing(camera: str, bearing_deg: float, width_deg: float = 3.0):
+    """방위각을 그 카메라 화면의 박스 좌표로 되돌린다 (가짜 YOLO 검출용).
+
+    camera_bearing.bearing_from_box의 역함수다 — 테스트가 환산식을 베껴 쓰지 않도록
+    여기서는 역으로 만들고, 검증은 실제 환산 함수에 맡긴다.
+    """
+    got = camera_bearing.intrinsics(camera)
+    if got is None:
+        return None
+    fx, cx, _width = got
+    yaw = camera_bearing.camera_yaw_deg(camera)
+
+    def u_of(b):
+        return cx + fx * math.tan(math.radians(yaw - b))
+
+    u_left = u_of(bearing_deg + width_deg / 2.0)    # 방위가 큰 쪽 = 화면 왼쪽
+    u_right = u_of(bearing_deg - width_deg / 2.0)
+    return (u_left, 400.0, u_right, 800.0)
+
+
 def run_case(class_name: str, bearing_deg: float, start_m: float, closing_mps: float,
-             duration_sec: float, outdir: Path = None, label: str = ""):
-    """가짜 센서를 꽂고 live_demo의 실제 경로를 duration_sec 동안 돌린다."""
+             duration_sec: float, outdir: Path = None, label: str = "",
+             decoy=None, detect: bool = False):
+    """가짜 센서를 꽂고 live_demo의 실제 경로를 duration_sec 동안 돌린다.
+
+    detect=True면 가짜 YOLO 검출(실제 방위에 맞춘 박스)을 함께 넣어, 카메라 지목 →
+    박스→방위 환산 → 좁은 창으로 라이다 조회 경로를 탄다.
+    """
     lidar.set_config(lidar.LidarConfig(mount_height_m=MOUNT_HEIGHT_M, mount_offset_deg=0.0))
-    scanner = FakeScanner(bearing_deg, start_m, closing_mps)
+    scanner = FakeScanner(bearing_deg, start_m, closing_mps, decoy=decoy)
     receiver = FakeReceiver(class_name, bearing_deg)
 
     live_demo.LIDAR_AVAILABLE = True
@@ -142,7 +175,9 @@ def run_case(class_name: str, bearing_deg: float, start_m: float, closing_mps: f
     state = live_demo.SharedState()
     stop = threading.Event()
     worker = threading.Thread(
-        target=_worker_until, args=(state, receiver, AlertPolicy(), stop), daemon=True)
+        target=_worker_until,
+        args=(state, receiver, AlertPolicy(), stop, scanner if detect else None),
+        daemon=True)
     worker.start()
 
     samples = []          # (t, 화면에 보이는 거리, 진짜 거리)
@@ -172,7 +207,7 @@ def run_case(class_name: str, bearing_deg: float, start_m: float, closing_mps: f
             "frames": frames, "packets": receiver.seq, "scanner": scanner}
 
 
-def _worker_until(state, receiver, policy, stop):
+def _worker_until(state, receiver, policy, stop, detect_scanner=None):
     """detection_worker는 무한 루프라, 테스트에서는 종료 조건을 준 복제본을 쓴다.
 
     ⚠️ 여기서 복제하는 것은 **루프 제어뿐**이고 판정 경로(decide_alert / state.trigger)는
@@ -192,12 +227,25 @@ def _worker_until(state, receiver, policy, stop):
         sigma = float(packet["sigma"])
         camera = live_demo.select_camera(doa, mount_offset_deg=0.0)
         last_camera = camera
+        detection = None
+        if detect_scanner is not None:
+            # YOLO가 실제 대상을 제대로 잡았다고 가정한 박스. live_demo.run_detection이
+            # 하듯 camera_bearing으로 방위를 환산해 붙인다(환산은 실제 함수가 한다).
+            box = box_for_bearing(camera, detect_scanner.bearing_deg)
+            if box is not None:
+                bearing = camera_bearing.bearing_from_box(camera, box)
+                detection = {"label": live_demo.DETECTION_EXPECT.get(top_class, "Ambulance"),
+                             "conf": 0.9, "box": list(box), "camera": camera,
+                             "bearing_deg": bearing["bearing_deg"],
+                             "half_width_deg": bearing["half_width_deg"]}
+        query = live_demo.distance_query(doa, sigma, detection)
         level, distance, blind, detail = live_demo.decide_alert(
-            policy, top_class, doa, None, rms_db, float(packet["score"]), True, sigma)
+            policy, top_class, doa, detection, rms_db, float(packet["score"]), True,
+            sigma, query)
         track = live_demo._lidar_tracker.get(top_class)
         state.trigger(camera, top_class, live_demo.LOC_LABEL_KO[last_camera],
-                      None, level, distance, blind, theta=doa, sigma=sigma,
-                      detail=detail, match=track)
+                      detection, level, distance, blind, theta=doa, sigma=sigma,
+                      detail=detail, match=track, query=query)
 
 
 def main():
@@ -265,8 +313,33 @@ def main():
         check("거리 표시", t2["distance"] is not None,
               f"{None if t2['distance'] is None else round(t2['distance'], 1)}m")
 
-    # ── 3) 라이다가 죽으면 ───────────────────────────────────────────────────
-    print("\n[3] 라이다 폴백 — 스캐너를 죽이고 같은 소리를 넣는다")
+    # ── 3) 최종 경로: 카메라가 지목한 그 물체의 거리 ─────────────────────────
+    print(f"\n[3] 사이렌 — 전방우측 -15°, 40m에서 5m/s로 접근 + **같은 창 안에 주차 차량(-24°, 12m)**")
+    print("    YOLO가 구급차를 지목 → 박스→방위 환산 → 좁은 창으로 라이다 조회")
+    r3 = run_case("siren", -15.0, 40.0, 5.0, args.duration, outdir, "siren_det",
+                  decoy=(-24.0, 12.0), detect=True)
+    t3 = r3["targets"][0] if r3["targets"] else None
+    truth3 = r3["scanner"].truth_distance()
+    check("감지가 유지된다", t3 is not None)
+    if t3 is not None:
+        check("거리 근거가 '카메라'", t3.get("source") == "카메라", f"source={t3.get('source')}")
+        check("각도 창이 박스 폭만큼 좁다",
+              t3.get("window_deg") is not None and t3["window_deg"] <= 8.0,
+              f"±{t3.get('window_deg')}°")
+        err3 = None if t3["distance"] is None else abs(t3["distance"] - truth3)
+        check("미끼(12m) 대신 지목한 물체를 잰다", err3 is not None and err3 < 2.5,
+              f"화면={None if t3['distance'] is None else round(t3['distance'], 1)}m "
+              f"실제={truth3:.1f}m (미끼 12.0m)")
+        check("전방 카메라로 전환", r3["camera"] == "front", f"camera={r3['camera']}")
+        det3 = t3.get("detection")
+        check("영상 위 박스에도 거리가 붙는다",
+              det3 is not None and det3.get("distance_m") is not None,
+              f"detection.distance_m={None if det3 is None else det3.get('distance_m')}")
+        check("화면이 근거를 밝힌다(카메라 지목)",
+              det3 is not None and det3.get("source") == "카메라")
+
+    # ── 4) 라이다가 죽으면 ───────────────────────────────────────────────────
+    print("\n[4] 라이다 폴백 — 스캐너를 죽이고 같은 소리를 넣는다")
     lidar.set_config(lidar.LidarConfig(mount_height_m=MOUNT_HEIGHT_M))
     dead = FakeScanner(0.0, 20.0, 0.0)
     dead.stop()

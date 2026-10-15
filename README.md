@@ -1,7 +1,8 @@
 # 올빼미러 — 소리로 위험을 보는 운전 보조 시스템
 
 > **주 사용자는 청각장애인 운전자다.** 사이렌·경적·오토바이 배기음을 마이크 어레이로 듣고,
-> 방향을 계산해 해당 방향 카메라를 자동으로 띄우고, LiDAR로 거리를 확정해 화면에 보여준다.
+> 방향을 계산해 해당 방향 카메라를 자동으로 띄우고, **그 화면에서 YOLO가 대상을 지목하면
+> 지목된 물체까지의 거리를 LiDAR로 재서** 영상 위에 그대로 보여준다.
 > 소리로 보완할 수 없으므로 **화면이 유일한 전달 경로**이고, 그 전제가 모든 설계의 근거다.
 >
 > 한이음 공모전 프로젝트 · ReSpeaker 4 Mic Array + Jetson Orin Nano + 카메라 4대 + VLP-16
@@ -43,6 +44,7 @@
 - **`MOUNT_OFFSET_DEG` 미실측** — σ 5~7°는 **정밀도**이고 정확도는 아직 모른다. 측정 도구(`lidar_calibrate.py`)는 준비됐고, 차량에서 실행만 하면 된다
 - **카메라 방향 배정 미검증** — 카메라 시리얼→방향이 캘리브레이션 ID로 유도한 값이라, 각 방향에서 손을 흔들어 물리 검증 필요
 - **접근 속도는 상대 속도** — 자차 속도를 안 쓰므로 주행 중에는 정지 구조물도 접근으로 보인다. 정차 상태에서 먼저 검증할 것
+- **카메라 화각 불일치** — 캘리브레이션 fx로는 수평화각 52.7°인데 하드웨어 문서는 2.8mm 렌즈(≈103°)다. 52.7°면 카메라 4대가 방위를 37°씩(합계 149°) 비워두고, 그 구역은 YOLO 지목이 불가능하다. **박스→방위 환산이 이 값에 매여 있어** 현장 확인이 최우선 (`camera_bearing.py --report`)
 
 ---
 
@@ -60,6 +62,22 @@
 └──────────────────────────────┘  직결  └────────────────────────────────────────┘
      192.168.10.2                             192.168.10.1
 ```
+
+### 최종 파이프라인 — 소리 → 지목 → 거리 → 화면 (2026-10-15 연결 완료)
+
+```
+① 소리로 방향을 찾는다      젯슨 ReSpeaker DoA → theta ± sigma   (σ 5~7°)
+② 그 방향 카메라를 띄운다    select_camera(theta)                 (전/좌/후/우)
+③ YOLO가 대상을 지목한다     구급차·오토바이 박스                  (클래스 어긋나면 버림)
+④ 박스를 방위각으로 되돌린다  camera_bearing.bearing_from_box()    (방위 1~3°, 창 ±3~12°)
+⑤ 그 방위에서 거리를 잰다    LiDAR 추적 → 거리·접근 속도·실측 방위
+⑥ 화면에 띄운다             영상 위 **대상 바로 아래 거리 판** + BEV 클러스터(이중 링)
+```
+
+소리는 *어디를 볼지*, 카메라는 *무엇인지*, LiDAR는 *얼마나 먼지*를 담당한다. ③④가 실패하면
+(가려짐·화각 밖) ⑤를 소리 방향으로 조회하는 경로로 떨어지고, 화면은 그 차이를 **"카메라 지목"
+/ "소리 방향"**으로 밝힌다 — 같은 24m라도 뜻이 다르기 때문이다
+([`ui_state_spec.md`](06_Display_Integration/ui_state_spec.md) §4-1).
 
 **젯슨→노트북 인터페이스** (초당 약 0.8회, `--interval 0` 기준)
 
@@ -116,6 +134,12 @@ LiDAR를 쓰는 사이렌·오토바이는 6m 이내 관측도 사각지대로 �
 
 화면은 **왼쪽 BEV 지도 | 오른쪽 카메라 영상** 반반이다. BEV는 마커가 아니라 **LiDAR 실제 리턴 포인트**로 그린다 — 매칭 확정은 색 클러스터, 미확정은 부채꼴, 6m 이내는 사각 구역 점등. 자차 둘레에는 감지 방향으로 호가 켜진다(양산차 사각지대 경고등과 같은 방식).
 
+**거리 판 (2026-10-15 신설)** — 오른쪽 영상에서 YOLO가 지목한 박스 **바로 아래**에 거리를 띄운다.
+지도에서 점을 찾아 눈으로 환산할 시간이 주행 중에는 없고, 운전자가 실제로 보는 것은 "저 구급차까지
+24m"라는 영상 위의 숫자다. 숫자(거리)·화살표(접근/후퇴)·글자(근거)를 함께 주고, 거리가 아직
+확정되지 않았으면 비워두는 대신 **"거리 확인 중"**이라고 적는다 — 빈 자리는 "거리가 없다"로도
+"센서가 못 본다"로도 읽히기 때문이다.
+
 ---
 
 ## 실행
@@ -129,6 +153,7 @@ python3 lidar_calibrate.py --height                           # 노면 리턴으
 python3 lidar_calibrate.py --bearing --expect 0               # 정면 10m 표적으로 요 오프셋
 python3 lidar_calibrate.py --height --bearing --expect 0 --write   # config/lidar_mount.json에 저장
 python3 lidar_calibrate.py --audio-offset --samples 20        # 라이다 기준으로 마이크 오프셋 역산
+python3 camera_bearing.py --report                            # 카메라 화각·커버리지 확인 (최우선)
 ```
 
 **이 두 값을 실측하기 전까지 화면의 거리는 믿을 수 없다** — 높이가 틀리면 노면이 "6~8m 앞
@@ -169,9 +194,11 @@ python3 -u jetson_audio_sender.py --host 192.168.10.1 \
 
 ```bash
 python3 08_Video_Demo/code/pipeline_selftest.py                            # ★ 파이프라인 전체 (약 15초)
-python3 08_Video_Demo/code/bev_render.py    --selftest --outdir /tmp/bev   # 화면 12종 PNG
+python3 08_Video_Demo/code/bev_render.py    --selftest --outdir /tmp/bev   # 화면 14종 PNG
 python3 08_Video_Demo/code/alert_policy.py  --selftest                     # 알림 규칙
 python3 08_Video_Demo/code/lidar_distance_match.py --selftest              # 거리 매칭·추적
+python3 08_Video_Demo/code/camera_bearing.py       --selftest              # 박스→방위 환산
+python3 08_Video_Demo/code/camera_bearing.py       --report                # 카메라 4대 화각·커버리지
 python3 08_Video_Demo/code/lidar_calibrate.py      --selftest              # 캘리브레이션 추정
 python3 08_Video_Demo/code/doa_camera_select.py    --selftest              # 방향→카메라
 python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
@@ -206,6 +233,7 @@ python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
     ├── camera_ui_mockup.html     UI 기준 디자인 (시나리오 10종, 인터랙티브)
     ├── calibration/cam1~4_calib/ 카메라 내부 파라미터
     ├── config/lidar_mount.json   라이다 장착값·매칭 파라미터 (캘리브레이션 도구가 기록)
+    ├── config/camera_mount.json  카메라 장착 trim·화각 override (박스→방위 환산용)
     ├── model_outputs/            YOLO 구급차·오토바이 검출 모델 (가중치는 gitignore)
     └── code/
         ├── jetson_audio_sender.py   [젯슨] 수음→분류→DoA→UDP 송신
@@ -214,6 +242,7 @@ python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
         ├── bev_render.py            화면 합성 — BEV|카메라 반반, 주간/야간 팔레트
         ├── live_demo.py             오케스트레이터 (카메라·LiDAR·수신·화면)
         ├── lidar_distance_match.py  VLP-16 수신 → 소리 방향 조회 → 거리 확정·추적
+        ├── camera_bearing.py        YOLO 박스 → 차량 좌표계 방위각 (라이다 조회 방향)
         ├── lidar_calibrate.py       [현장] 장착 높이·요 오프셋 실측, 마이크 오프셋 역산
         ├── pipeline_selftest.py     가짜 센서로 파이프라인 전체 검증 (하드웨어 불필요)
         ├── doa_camera_select.py     펌웨어 DoA 읽기 + 방향→카메라 매핑

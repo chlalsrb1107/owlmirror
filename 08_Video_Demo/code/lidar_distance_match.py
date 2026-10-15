@@ -110,6 +110,7 @@ class LidarConfig:
     track_coast_sec: float = 0.6      # 놓쳐도 이만큼은 마지막 값을 유지한다
     track_drop_sec: float = 2.0       # 이만큼 못 보면 추적을 버린다
     track_gate_m: float = 4.0         # 예측 거리에서 이만큼 벗어나면 다른 물체로 본다
+    track_follow_max_deg: float = 30.0  # 추적 중 조회 방위가 원 요청에서 이 이상 벗어나지 않게 묶는다
     track_ema_alpha: float = 0.45     # 거리 평활화 (1.0이면 평활화 없음)
     closing_window_sec: float = 2.0   # 접근 속도를 재는 과거 구간
     closing_min_span_sec: float = 0.5  # 이보다 짧은 구간으로는 속도를 내지 않는다
@@ -538,11 +539,21 @@ class TargetTracker:
             return None if tr is None else self._as_result(tr, time.time())
 
     def update(self, class_name: str, theta_deg: float, points: np.ndarray,
-               sigma_deg: float = None, scan_id: int = None, now: float = None):
+               sigma_deg: float = None, scan_id: int = None, now: float = None,
+               window_deg: float = None, follow: bool = True):
         """새 스캔으로 추적을 갱신하고 결과 dict(또는 None)를 돌려준다.
 
         결과는 match_distance()의 dict에 추적 정보를 더한 형태라, alert_policy가 보던
         "distance_m / blind" 계약을 그대로 만족한다.
+
+        window_deg: 각도 창을 직접 지정한다(없으면 sigma에서 만든다). **카메라가 YOLO로
+            대상을 지목한 경우**가 이 경로다 — 박스 폭에서 나온 2~6° 창은 소리 방향에서
+            나오는 8~30° 창보다 훨씬 좁아서, 옆 차선 차량이 아니라 지목된 그 물체를 잰다.
+        follow: 추적 중이면 요청 방위 대신 **직전에 라이다가 본 방위**에서 이어 찾는다.
+            좁은 창을 쓸 때 꼭 필요하다 — 카메라 검출은 젯슨 패킷 주기(약 1초)로만
+            갱신되는데 대상은 그 사이에도 움직이므로, 고정 방위로 좁게 조회하면 놓친다.
+            원 요청에서 track_follow_max_deg 이상은 벗어나지 않게 묶어, 추적이 엉뚱한
+            물체로 흘러가는 것을 막는다.
         """
         cfg = self.cfg
         now = time.time() if now is None else now
@@ -557,7 +568,24 @@ class TargetTracker:
             if tr is not None and scan_id is not None and scan_id == tr.get("scan_id"):
                 return self._as_result(tr, now)
 
-            match = match_distance(points, theta_deg, sigma_deg=sigma_deg, cfg=cfg)
+            # 추적 중이면 마지막으로 본 방위에서 이어 찾는다 (위 follow 설명 참고)
+            query_deg = float(theta_deg)
+            if follow and tr is not None and not tr["blind"]:
+                last_az = tr["match"].get("azimuth_deg")
+                if last_az is not None:
+                    drift = float(_wrap180(last_az - theta_deg))
+                    drift = max(-cfg.track_follow_max_deg,
+                                min(cfg.track_follow_max_deg, drift))
+                    query_deg = float(_wrap180(theta_deg + drift))
+
+            match = match_distance(points, query_deg, angle_margin_deg=window_deg,
+                                   sigma_deg=sigma_deg, cfg=cfg)
+            if match is not None:
+                # 방향 오차는 **원 요청 방향**(소리 방향 또는 카메라 방위) 기준으로 다시 쓴다.
+                # follow로 조회 방위가 옮겨가도, 화면과 마이크 보정이 봐야 할 기준은
+                # "우리가 물어본 방향과 라이다가 본 방향의 차이"다.
+                match["query_deg"] = query_deg
+                match["bearing_error_deg"] = float(_wrap180(match["azimuth_deg"] - theta_deg))
 
             if match is None:
                 if tr is not None and now - tr["last_at"] <= cfg.track_coast_sec:
@@ -825,6 +853,24 @@ def run_tracker_test() -> bool:
     good = dropped is None
     ok &= good
     print(f"  {'오래 놓치면 추적 폐기':30s} got={_fmt(dropped)}  [{_pf(good)}]")
+
+    # 카메라가 지목한 좁은 창(±2.5°)으로도, 대상이 옆으로 흘러가면 follow가 따라붙는다.
+    # (YOLO 박스는 1초에 한 번만 갱신되는데 대상은 그 사이에도 움직인다)
+    res_follow = res_fixed = None
+    tr_follow, tr_fixed = TargetTracker(), TargetTracker()
+    for i in range(1, 13):
+        az = 1.5 * i                      # 매 스캔 1.5°씩 옆으로 — 12스캔이면 18°
+        scene = _make_fake_points(az, 30.0 - 0.5 * i, n=40)
+        res_follow = tr_follow.update("siren", 0.0, scene, sigma_deg=6.0, scan_id=i,
+                                      now=t0 + 0.1 * i, window_deg=2.5)
+        res_fixed = tr_fixed.update("siren", 0.0, scene, sigma_deg=6.0, scan_id=i,
+                                    now=t0 + 0.1 * i, window_deg=2.5, follow=False)
+    good = res_follow is not None and res_follow["confirmed"]
+    ok &= good
+    print(f"  {'좁은 창 + follow로 추적 유지':30s} got={_fmt(res_follow)}  [{_pf(good)}]")
+    good = res_fixed is None
+    ok &= good
+    print(f"  {'follow 없으면 놓친다(대조군)':30s} got={_fmt(res_fixed)}  [{_pf(good)}]")
 
     # 멀어지는 물체는 closing이 음수
     tracker2 = TargetTracker()

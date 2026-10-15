@@ -62,7 +62,13 @@
     <b>(2026-09-02) 이 레이아웃은 실제 코드로 구현됐다</b> — `08_Video_Demo/code/bev_render.py`(신규)가
     그리기를 전담하고 `live_demo.py`가 상태를 넘긴다. 하드웨어 없이 확인하려면
     <code>python3 bev_render.py --selftest</code>로 시나리오별 PNG를 뽑을 수 있다. 이 목업은 기준
-    디자인으로 계속 남는다.</p>
+    디자인으로 계속 남는다.<br>
+    <b>(2026-10-15) 차량 실장착과 함께 최종 파이프라인이 화면까지 연결됐다</b> —
+    <b>소리로 방향을 찾고 → 그 방향 카메라가 YOLO로 대상을 지목하고 → 지목된 박스를 방위각으로
+    환산해 → 그 좁은 창으로 LiDAR가 거리를 재서 → 영상 위 그 대상 바로 아래에 거리를 띄운다.</b>
+    오른쪽 영상의 <b>거리 판</b>이 그 결과물이고, 숫자(거리)·화살표(접근/후퇴)·근거(카메라 지목인지
+    소리 방향인지)를 함께 준다 — 같은 "24m"라도 카메라가 지목한 대상의 24m와 소리 방향에서 주운
+    24m는 뜻이 다르기 때문이다. BEV에서는 카메라가 지목한 대상에만 이중 링이 붙는다.</p>
   </header>
 
   <div class="grid">
@@ -262,15 +268,19 @@ const S=[
  note:"카메라 전환·Detection은 됐지만 LiDAR 포인트가 MIN_POINTS를 못 채워 매칭 실패 — BEV에 성긴 점만 뿌려 '신호는 있으나 확정 못 함'을 그대로 보여줍니다."},
 
 {n:"사이렌 · 차량 확정 (32m)",cam:"left",k:"siren",g:"사이렌",lv:"경고",loc:"좌측",angle:266,dist:32,
- cluster:16, det:{label:"Ambulance",conf:.92},
- note:"LiDAR 포인트가 한 군데로 뭉쳐 매칭 확정 — BEV에 촘촘한 점 클러스터로 표시하고, 응급차량 양보 의무 기준으로 경고(빨강)까지 올립니다. 영상 스크립트 ② 장면."},
+ cluster:16, det:{label:"Ambulance",conf:.92,source:"카메라",closing:7},
+ note:"(2026-10-15 갱신) 카메라가 경광등을 보고 지목한 대상의 박스를 **방위각으로 환산**해, 그 좁은 창(±3°)으로 LiDAR가 거리를 쟀습니다 — 같은 방향에 차가 여러 대 있어도 지목된 그 차의 거리입니다. 영상 위 박스 아래의 거리 판이 최종 파이프라인의 결과물이고, 숫자(32m)·화살표(접근)·근거(카메라 지목)를 함께 줍니다. 영상 스크립트 ② 장면."},
+
+{n:"지목했으나 거리 확인 중",cam:"left",k:"siren",g:"사이렌",lv:"경고",loc:"좌측",angle:266,
+ wedgePoints:9, det:{label:"Ambulance",conf:.92,source:"카메라"},
+ note:"(2026-10-15 신규) 카메라는 대상을 지목했는데 LiDAR 추적이 아직 확정(서로 다른 스캔 2회)되지 않은 순간입니다. 숫자 자리를 비워두지 않고 **'거리 확인 중'이라고 말합니다** — 비어 있으면 운전자는 '거리가 0'인지 '센서가 못 보는지' 구분할 수 없습니다."},
 
 {n:"오토바이 → 우측 (15~25m 접근)",cam:"right",k:"moto",g:"오토바이",lv:"주의",loc:"우측",angle:100,dist:20,
  cluster:13, det:{label:"Motorcycle",conf:.87},
  note:"거리(20m)까지 확인됐지만 아직 접근 관찰 구간이라 주의(노랑) — 포인트 밀도는 확정 수준이라 클러스터로 표시."},
 
 {n:"오토바이 → 우측 (15m 이내 근접, 경고)",cam:"right",k:"moto",g:"오토바이",lv:"경고",loc:"우측",angle:100,dist:12,
- cluster:16,pulse:1, det:{label:"Motorcycle",conf:.87},
+ cluster:16,pulse:1, det:{label:"Motorcycle",conf:.87,source:"카메라",closing:5},
  note:"12m — 15m 임계선 안쪽으로 들어와 경고(빨강)로 상향, 클러스터 주변에 펄스 링 추가. 영상 스크립트 ① 리드 샷 후반부."},
 
 {n:"오토바이 · 사각지대(6m 이내)",cam:"left",k:"moto",g:"오토바이",lv:"경고",loc:"좌측",angle:256,blind:1,
@@ -329,6 +339,29 @@ function draw(i){
     CD.appendChild(el("rect",{x:1180,y:322,width:300,height:44,rx:6,fill:kc}));
     CD.appendChild(el("text",{x:1200,y:353,fill:"#0B0B0B","font-size":24,"font-weight":600,
       "font-family":F},`${s.det.label} ${Math.round(s.det.conf*100)}%`));
+    /* 거리 판 — 지목한 대상 **바로 아래**에. 최종 파이프라인(소리→카메라 지목→라이다
+       거리)의 결과가 운전자에게 닿는 자리다. 숫자·화살표·근거를 함께 준다. */
+    const src = s.det.source==="소리" ? "소리 방향 · 라이다" : "카메라 지목 · 라이다";
+    let main, sub, mc;
+    if(s.blind){ main="6m 이내"; sub="사각지대 — 라이다 사각"; mc=C.red; }
+    else if(s.dist==null){ main="거리 확인 중"; sub=src; mc=C.dim; }
+    else {
+      main=`${s.dist}m`; mc=lc||kc; sub=src;
+      if(s.det.closing) sub=`${s.det.closing>0?"접근":"멀어짐"} ${Math.abs(s.det.closing)}m/s · ${src}`;
+    }
+    const pw=Math.max(300, 150+sub.length*13);
+    CD.appendChild(el("rect",{x:1180,y:712,width:pw,height:92,rx:8,fill:"#0B0B0B",
+      "fill-opacity":.78,stroke:mc,"stroke-width":3}));
+    CD.appendChild(el("rect",{x:1180,y:712,width:8,height:92,fill:mc}));
+    if(s.dist!=null && s.det.closing){
+      const up=s.det.closing>0, ax=1216, ay=748, d=13;
+      CD.appendChild(el("polygon",{fill:mc,points:
+        `${ax},${ay+(up?d:-d)} ${ax-d},${ay-(up?d:-d)} ${ax+d},${ay-(up?d:-d)}`}));
+    }
+    CD.appendChild(el("text",{x:(s.dist!=null&&s.det.closing)?1244:1204,y:762,fill:mc,
+      "font-size":54,"font-weight":700,"font-family":F},main));
+    CD.appendChild(el("text",{x:(s.dist!=null&&s.det.closing)?1244:1204,y:792,fill:C.dim,
+      "font-size":22,"font-family":F},sub));
   }
   if(s.oos){
     CD.appendChild(el("text",{x:1440,y:610,fill:kc,"font-size":38,"font-weight":700,

@@ -400,6 +400,17 @@ def draw_wedge(img, theta_deg, spread_deg, color, points=None):
         draw_lidar_points(img, inner, tuple(int(c * 0.55) for c in color), size=1)
 
 
+def draw_confirmed_ring(img, cx, cy, color):
+    """카메라가 지목한 대상임을 BEV에서도 구분한다 (2026-10-15).
+
+    같은 "24m"라도 근거가 다르다 — 카메라가 경광등을 보고 지목한 24m는 그 물체가 소리를
+    낸 당사자라는 뜻이고, 소리 방향만으로 얻은 24m는 "그 방향에 무언가 있다"는 뜻이다.
+    운전자에게 숫자만 같게 보여주면 두 번째를 첫 번째로 오해한다.
+    """
+    cv2.circle(img, (int(cx), int(cy)), _px(26), color, 2, cv2.LINE_AA)
+    cv2.circle(img, (int(cx), int(cy)), _px(33), color, 1, cv2.LINE_AA)
+
+
 def draw_cluster(img, theta_deg, distance_m, color, cluster_points=None, pulse=False):
     """확정 대상: 실제 리턴 점을 클래스 색으로 다시 칠하고 후광을 얹는다."""
     cx, cy = to_px(theta_deg, distance_m)
@@ -491,6 +502,81 @@ def draw_camera_selector(img, active, level, text, x0, y0, width):
                  (12, 12, 12) if on else DIM, anchor="mm")
 
 
+# 거리의 **근거**를 한 마디로. 같은 24m라도 카메라가 지목한 대상의 24m와 소리 방향에서
+# 주운 24m는 뜻이 다르다(ui_state_spec.md §4-1).
+SOURCE_LABEL_KO = {"카메라": "카메라 지목 · 라이다", "소리": "소리 방향 · 라이다"}
+
+
+def _text_width_px(s: str, size: int) -> int:
+    """글자 폭 어림 — 한글·기호는 size만큼, 영문·숫자는 그 절반쯤 차지한다."""
+    wide = sum(1 for ch in s if ord(ch) > 0x2E80)
+    return int(size * (1.04 * wide + 0.60 * (len(s) - wide)))
+
+
+def draw_distance_plate(img, text, center_x, top_y, detection, level_col, bounds):
+    """지목된 대상 **바로 아래**에 거리를 큼직하게 붙인다 (2026-10-15 신규).
+
+    최종 파이프라인이 운전자에게 내놓는 결과물이 이 숫자다 — 소리로 방향을 찾고, 카메라가
+    대상을 지목하고, 라이다가 그 대상까지의 거리를 쟀다는 과정 전체가 여기로 모인다.
+    BEV의 점 클러스터로도 거리를 알 수 있지만, 운전자가 실제로 보는 것은 "저 구급차까지
+    24m"라는 영상 위의 숫자다 — 지도에서 점을 찾아 눈으로 환산하는 시간이 없다.
+
+    주 사용자가 청각장애인이라 경고음이 없으므로(ui_state_spec.md §1-1):
+      · 숫자(거리) + 화살표(접근/후퇴) + 글자(근거)를 함께 준다 — 한 경로가 막혀도 전달된다
+      · 거리를 모르면 비워두지 않고 **"거리 확인 중"이라고 말한다**. 숫자가 없는 것과
+        센서가 못 보는 것을 운전자가 구분할 수 있어야 한다
+      · 사각지대(6m 이내)는 숫자 대신 "사각지대"다 — 없는 정확도를 있는 척하지 않는다
+    """
+    distance = detection.get("distance_m")
+    closing = detection.get("closing_mps")
+    blind = bool(detection.get("blind"))
+    source = SOURCE_LABEL_KO.get(detection.get("source"), "라이다 측정")
+
+    if blind:
+        main, sub, col = "6m 이내", "사각지대 — 라이다 사각", RED
+    elif distance is None:
+        main, sub, col = "거리 확인 중", source, DIM
+    else:
+        main, col = f"{distance:.0f}m", level_col
+        sub = source
+        if closing is not None and abs(closing) >= 1.0:
+            sub = f"{'접근' if closing > 0 else '멀어짐'} {abs(closing):.0f}m/s · {source}"
+            # 글자가 판을 넘지 않도록 — 넘치면 읽는 사람에게는 잘린 글자가 된다
+            if len(sub) > 26:
+                sub = f"{'접근' if closing > 0 else '멀어짐'} {abs(closing):.0f}m/s"
+
+    # 판 너비는 들어갈 글자에 맞춘다. 고정 폭으로 두면 한글이 넘쳐 잘린 글자가 되는데,
+    # 잘린 숫자는 틀린 숫자보다 낫지 않다.
+    arrow = (not blind and distance is not None
+             and closing is not None and abs(closing) >= 1.0)
+    text_x = _px(56) if arrow else _px(20)
+    pw = text_x + max(_text_width_px(main, _ts(44)), _text_width_px(sub, _ts(20))) + _px(26)
+    ph = _px(74)
+    bx0, by0, bw, bh = bounds
+    x0 = int(min(max(center_x - pw // 2, bx0 + _px(6)), bx0 + bw - pw - _px(6)))
+    y0 = int(min(max(top_y, by0 + _px(6)), by0 + bh - ph - _px(6)))
+
+    # 반투명 판 위에 글자 — 영상이 비쳐 보여야 대상이 가려지지 않는다
+    panel = img[y0:y0 + ph, x0:x0 + pw]
+    if panel.size:
+        panel[:] = (panel.astype(np.float32) * 0.25).astype(np.uint8)
+    cv2.rectangle(img, (x0, y0), (x0 + pw, y0 + ph), col, 2, cv2.LINE_AA)
+    cv2.rectangle(img, (x0, y0), (x0 + _px(6), y0 + ph), col, -1)   # 단계 색 막대
+
+    if arrow:
+        # 숫자 왼쪽에 접근/후퇴 삼각형 — 글자를 읽기 전에 방향이 먼저 보이게
+        ax, ay, d = x0 + _px(34), y0 + _px(30), _px(11)
+        nearer = closing > 0   # 접근 = 가까워짐 = 자차 쪽(아래)을 가리키는 삼각형
+        pts = np.array([[ax, ay + (d if nearer else -d)],
+                        [ax - d, ay - (d if nearer else -d)],
+                        [ax + d, ay - (d if nearer else -d)]], dtype=np.int32)
+        cv2.fillConvexPoly(img, pts, col, cv2.LINE_AA)
+    text.add(main, (x0 + text_x, y0 + _px(30)), _ts(44), col, anchor="lm")
+    text.add(sub, (x0 + text_x, y0 + _px(58)), _ts(20),
+             DIM if distance is None and not blind else RING_TXT, anchor="lm")
+    return x0, y0, pw, ph
+
+
 def draw_camera_pane(img, frame_bgr, detection, text, active_camera=None, level=None):
     """카메라 프레임을 오른쪽 절반에 레터박스로 넣고, Detection 박스를 실제 좌표에 그린다.
 
@@ -525,6 +611,11 @@ def draw_camera_pane(img, frame_bgr, detection, text, active_camera=None, level=
             cv2.rectangle(img, (bx0, max(BANNER_H, by0 - 26)), (bx0 + 150, by0), col, -1)
             cv2.putText(img, tag, (bx0 + 6, by0 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (10, 10, 10), 1, cv2.LINE_AA)
+            # 지목한 대상 바로 아래에 거리 — 박스와 숫자가 떨어져 있으면 운전자가
+            # "무엇까지의 거리인지" 눈으로 이어붙여야 한다
+            level_col = LEVEL_COLOR.get(level, col)
+            draw_distance_plate(img, text, (bx0 + bx1) // 2, by1 + _px(10), detection,
+                                level_col, (x0, y0, vw, vh))
 
     if active_camera is not None and (y0 - BANNER_H) >= _px(56):
         draw_camera_selector(img, active_camera, level, text,
@@ -641,6 +732,8 @@ def render(camera_frame_bgr, camera_name, targets, points=None,
                 tgt.get("window_deg") or lidar.DEFAULT_ANGLE_MARGIN_DEG)
             cx, cy = draw_cluster(img, theta_obj, tgt["distance"], col, cluster,
                                   pulse=(tgt["level"] == "경고"))
+            if tgt.get("source") == "카메라":
+                draw_confirmed_ring(img, cx, cy, col)
             _glyph(img, kind, cx, cy - _px(38), 0.52 * TEXT_SCALE, col)
             left = cx < CX
             tx = cx - _px(44) if left else cx + _px(44)
@@ -722,15 +815,22 @@ def run_selftest(outdir: Path):
     cv2.putText(cam, "CAMERA", (700, 640), cv2.FONT_HERSHEY_SIMPLEX, 5.0, (70, 70, 70), 8)
 
     def tgt(cls, theta, level, dist=None, blind=False, sigma=12.0, loc="좌측", detail=None,
-            theta_lidar=None, closing=None, window_deg=None):
+            theta_lidar=None, closing=None, window_deg=None, source="소리"):
         return {"class_name": cls, "theta": theta, "level": level, "distance": dist,
-                "blind": blind, "sigma": sigma, "loc": loc, "detail": detail,
+                "blind": blind, "sigma": sigma, "loc": loc, "detail": detail, "source": source,
                 # (2026-10-15) 라이다 추적에서 오는 값들 — 물체는 소리 방향이 아니라
                 # theta_lidar(실측 방위)에 그리고, closing이 있으면 거리 아래 변화량을 붙인다.
                 "theta_lidar": theta_lidar, "closing": closing, "window_deg": window_deg}
 
-    amb = {"label": "Ambulance", "conf": 0.92, "box": (760, 380, 1290, 860)}
-    moto_det = {"label": "Motorcycle", "conf": 0.87, "box": (900, 500, 1330, 880)}
+    def det(label, conf, box, distance=None, closing=None, blind=False, source="카메라"):
+        return {"label": label, "conf": conf, "box": box, "distance_m": distance,
+                "closing_mps": closing, "blind": blind, "source": source}
+
+    amb = det("Ambulance", 0.92, (760, 380, 1290, 860))
+    amb_24 = det("Ambulance", 0.92, (760, 380, 1290, 860), distance=24.0, closing=7.0)
+    amb_pending = det("Ambulance", 0.92, (760, 380, 1290, 860))
+    moto_det = det("Motorcycle", 0.87, (900, 500, 1330, 880), distance=16.0, closing=-5.0)
+    moto_blind = det("Motorcycle", 0.81, (900, 500, 1330, 880), blind=True)
 
     # alert_policy.py의 클래스별 규칙(2026-09-02)을 그대로 반영한 시나리오
     scenes = [
@@ -764,12 +864,22 @@ def run_selftest(outdir: Path):
         # 상황. 점 클러스터와 거리 라벨이 **88° 쪽**에 붙어야 맞다(= 실제 점군과 일치).
         ("11_siren_approach", "left",
          [tgt("siren", 94, "경고", 24.0, detail="접근 7m/s",
-              theta_lidar=88.0, closing=7.0, window_deg=12.0)],
-         _fake_scene(88, 24.0), True, amb),
+              theta_lidar=88.0, closing=7.0, window_deg=4.0, source="카메라")],
+         _fake_scene(88, 24.0), True, amb_24),
         ("12_moto_receding", "right",
          [tgt("motorcycle", -100, "경고", 16.0, loc="우측", detail="위치 추적",
-              theta_lidar=-97.0, closing=-5.0, window_deg=14.0)],
+              theta_lidar=-97.0, closing=-5.0, window_deg=5.0, source="카메라")],
          _fake_scene(-97, 16.0), True, moto_det),
+        # 카메라는 대상을 지목했는데 라이다 거리가 아직 안 붙은 순간 — 숫자를 비워두지 않고
+        # "거리 확인 중"이라고 말해야 한다(센서가 못 보는 것과 구분)
+        ("13_detected_no_distance", "left",
+         [tgt("siren", 94, "경고", detail="위치 미확정", source="카메라")],
+         _fake_scene(), True, amb_pending),
+        # 지목은 했지만 6m 안으로 들어온 경우 — 거리 대신 사각지대
+        ("14_detected_blind", "right",
+         [tgt("motorcycle", -96, "경고", blind=True, loc="우측", detail="사각지대",
+              source="카메라")],
+         _fake_scene(), True, moto_blind),
     ]
 
     for name, camera, targets, points, ok, det in scenes:

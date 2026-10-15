@@ -66,7 +66,6 @@ LiDAR로 방향별 거리를 매칭해 확정된 대상은 ui_state_spec.md 기�
 """
 
 import argparse
-import json
 import sys
 import threading
 import time
@@ -81,6 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # 여기서 import하지 않는다 — 노트북에 torch/pyaudio/pyusb를 설치할 필요가 없어진다.
 from audio_receiver import AudioDetectionReceiver, DEFAULT_PORT  # noqa: E402
 from doa_camera_select import select_camera  # noqa: E402
+import camera_bearing  # noqa: E402
 import lidar_distance_match as lidar  # noqa: E402
 import bev_render  # noqa: E402
 import alert_policy  # noqa: E402
@@ -135,9 +135,9 @@ _camera_handles = {}
 #    빠져나가는 순간 GC돼서 카메라가 조용히 죽는다 — 2026-09-01 실장비에서 실제로 겪음.
 _device_manager = None
 
-CALIBRATION_DIR = REPO_ROOT / "08_Video_Demo" / "calibration"
-# 방향별 담당 캠 번호를 미리 확정 — 설치 시 이 번호에 맞는 물리 카메라를 해당 방향에 붙이면 됨.
-CAMERA_CALIB_ID = {"front": 4, "left": 1, "right": 2, "rear": 3}
+# 방향별 담당 캠 번호·캘리브레이션 읽기는 camera_bearing이 들고 있다 — 박스→방위 환산이
+# 같은 내부 파라미터를 써야 하므로, 두 군데 두면 반드시 어긋난다.
+CAMERA_CALIB_ID = camera_bearing.CAMERA_CALIB_ID
 
 # 노출 상한(us) — 주행 중 모션블러를 지배하는 값. 50km/h(=13.9m/s)에서 한 프레임 흐림:
 #   8ms → 11cm(허용) / 20ms → 28cm / 223ms → 3.1m(형체 불명, 상한 없을 때의 실측값)
@@ -246,17 +246,11 @@ def close_all_cameras():
 
 
 def load_calibration(camera: str):
-    """camera_matrix, dist_coeffs 튜플. CAMERA_CALIB_ID[camera]가 None이면 None 반환."""
-    cam_id = CAMERA_CALIB_ID.get(camera)
-    if cam_id is None:
-        return None
+    """왜곡보정용 (camera_matrix, dist_coeffs). 캘리브레이션이 없으면 None."""
     if camera not in _calib_cache:
-        calib_path = CALIBRATION_DIR / f"cam{cam_id}_calib" / "results" / "calibration.json"
-        with open(calib_path) as f:
-            data = json.load(f)
-        camera_matrix = np.array(data["camera_matrix"])
-        dist_coeffs = np.array(data["distortion_coefficients"])
-        _calib_cache[camera] = (camera_matrix, dist_coeffs)
+        data = camera_bearing.load_calibration(camera)
+        _calib_cache[camera] = None if data is None else (
+            np.array(data["camera_matrix"]), np.array(data["distortion_coefficients"]))
     return _calib_cache[camera]
 
 
@@ -307,7 +301,30 @@ def run_detection(detector, camera: str, class_name: str):
         return None
 
     xyxy = [float(v) for v in best.xyxy[0].tolist()]
-    return {"label": result.names[int(best.cls)], "conf": float(best.conf), "box": xyxy}
+    detection = {"label": result.names[int(best.cls)], "conf": float(best.conf), "box": xyxy,
+                 "camera": camera}
+    # 박스를 **차량 좌표계 방위각**으로 환산한다 — 이 방위가 라이다 조회 방향이 된다.
+    # 소리 방향(σ 5~7°)이 아니라 카메라가 지목한 방위(1~3°)로 물어봐야, 그 방향에 차가
+    # 여러 대일 때 "소리를 낸 그 물체"의 거리가 나온다.
+    bearing = camera_bearing.bearing_from_box(camera, xyxy)
+    if bearing is not None:
+        detection["bearing_deg"] = bearing["bearing_deg"]
+        detection["half_width_deg"] = bearing["half_width_deg"]
+    return detection
+
+
+def _with_distance(detection, distance, match, source):
+    """카메라 영상 위에 그릴 검출 dict에 거리·접근·근거를 얹어 새 dict로 돌려준다.
+
+    원본을 고치지 않고 새로 만드는 이유: snapshot()은 얕은 복사라서, 제자리에서 고치면
+    표시 스레드가 읽는 중인 dict를 감지 스레드가 바꾸게 된다.
+    """
+    if detection is None:
+        return None
+    return {**detection, "distance_m": distance,
+            "closing_mps": (match or {}).get("closing_mps"),
+            "blind": bool((match or {}).get("blind")),
+            "source": source}
 
 
 class SharedState:
@@ -329,18 +346,23 @@ class SharedState:
 
     def trigger(self, camera: str, class_name: str, loc: str, detection,
                 level: str, distance, blind: bool, theta: float, sigma: float, detail: str,
-                match=None):
+                match=None, query=None):
         now = time.time()
         hold = HOLD_SEC_BY_CLASS.get(class_name, HOLD_SEC)
+        theta_q, window_q, source = query or (theta, None, "소리")
         with self.lock:
             self.active[class_name] = {
-                "class_name": class_name, "camera": camera, "loc": loc, "detection": detection,
+                "class_name": class_name, "camera": camera, "loc": loc,
+                "detection": _with_distance(detection, distance, match, source),
                 "level": level, "distance": distance, "blind": blind, "detail": detail,
                 "theta": theta, "sigma": sigma, "until": now + hold,
                 "theta_lidar": (match or {}).get("azimuth_deg") if not blind else None,
                 "window_deg": (match or {}).get("window_deg"),
                 "closing": (match or {}).get("closing_mps"),
                 "ttc": (match or {}).get("ttc_s"),
+                # 거리를 "어느 방향을 물어서" 얻었는지 — 표시 루프가 같은 방향으로 계속
+                # 재조회해야 하고, 화면도 그 근거(카메라/소리)를 운전자에게 밝혀야 한다.
+                "query_theta": theta_q, "query_window": window_q, "source": source,
             }
 
     # ---- 라이다 추적 갱신 (표시 루프가 매 프레임 호출) ------------------------
@@ -348,9 +370,15 @@ class SharedState:
     # 갱신하면 그 1초 동안 화면의 숫자와 점 클러스터가 과거를 가리킨다 — 50km/h면 14m를
     # 지나간 뒤다. 그래서 표시 루프가 매 프레임 추적을 돌려 거리만 따로 갱신한다.
     def lidar_queries(self):
-        """(class_name, theta, sigma) — 지금 거리를 갱신해야 하는 감지 목록."""
+        """(class_name, 조회 방위, sigma, 각도 창) — 지금 거리를 갱신해야 하는 감지 목록.
+
+        조회 방위는 **카메라가 지목한 방위**(있으면)이고 없으면 소리 방향이다. 감지 때
+        정해진 그 방향을 그대로 쓰는 이유: 여기서 다시 고르면 프레임마다 근거가 바뀌어
+        거리가 두 물체 사이를 오갈 수 있다. 대상이 움직이는 것은 추적기의 follow가 흡수한다.
+        """
         with self.lock:
-            return [(name, v["theta"], v.get("sigma"))
+            return [(name, v.get("query_theta", v["theta"]), v.get("sigma"),
+                     v.get("query_window"))
                     for name, v in self.active.items()
                     if v["theta"] is not None and name in LIDAR_MATCH_CLASSES]
 
@@ -369,7 +397,9 @@ class SharedState:
                 # 추적이 끊겼다(coast 구간도 지났다) — 숫자를 지운다. 사라진 물체의
                 # 마지막 거리를 계속 띄워두는 쪽이 아무것도 안 띄우는 것보다 나쁘다.
                 entry.update({"distance": None, "blind": False, "theta_lidar": None,
-                              "closing": None, "ttc": None})
+                              "closing": None, "ttc": None,
+                              "detection": _with_distance(entry["detection"], None, None,
+                                                          entry.get("source"))})
                 return
             if not track_usable(track):
                 return  # 아직 확정 전 — 직전 표시를 그대로 둔다(깜빡임 방지)
@@ -386,6 +416,10 @@ class SharedState:
                 "theta_lidar": None if track["blind"] else track.get("azimuth_deg"),
                 "window_deg": track.get("window_deg"),
                 "closing": track.get("closing_mps"), "ttc": track.get("ttc_s"),
+                # 카메라 영상 위 박스에 붙는 거리도 같이 갱신한다 — 운전자가 실제로 보는 것은
+                # BEV의 점이 아니라 "저 구급차까지 24m"라는 영상 위 숫자다.
+                "detection": _with_distance(entry["detection"], track["distance_m"], track,
+                                            entry.get("source")),
             })
             if class_name == "motorcycle" and entry["level"] != "경고" and (
                     track["blind"] or alert_policy.is_approaching(track)):
@@ -467,8 +501,10 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
         sigma = float(packet.get("sigma", 12.0))
         detection = (run_detection(detector, camera, top_class)
                      if top_class in DETECTION_CLASSES else None)
+        # 거리를 어느 방향으로 물을지 여기서 한 번 정해, 판정과 표시가 같은 근거를 쓰게 한다
+        query = distance_query(doa, sigma, detection)
         level, distance, blind, detail = decide_alert(policy, top_class, doa, detection,
-                                                      rms_db, score, theta_ok, sigma)
+                                                      rms_db, score, theta_ok, sigma, query)
         track = _lidar_tracker.get(top_class) if top_class in LIDAR_MATCH_CLASSES else None
         # 방향을 모를 때 "위치 미확정"까지 덧붙이면 배너에 같은 말이 두 번 나온다
         # ("경고 · 방향 미확정 · 위치 미확정"). 방향 쪽 문구만 남긴다.
@@ -482,18 +518,26 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
               f"(수음~표시 지연 {latency_ms:.0f}ms)")
         print(f"    -> {camera} 카메라로 전환, level={level} ({detail}), "
               f"distance={distance}, blind={blind}, detection={detection}")
+        if detection is not None and detection.get("bearing_deg") is not None:
+            # 카메라가 지목한 방위 — 이 값이 라이다 조회 방향이 된다. 소리 방향과의 차이가
+            # 꾸준히 한쪽으로 치우치면 그만큼 마이크(또는 카메라) 장착이 틀어져 있다는 뜻.
+            print(f"       카메라: {detection['label']} 방위={detection['bearing_deg']:+.1f}° "
+                  f"(박스 폭 ±{detection['half_width_deg']:.1f}°, 소리와 "
+                  f"{(detection['bearing_deg'] - doa + 180) % 360 - 180:+.1f}° 차이)")
         if track_usable(track) and not track["blind"]:
-            # 라이다가 본 방위와 소리 방향의 차이 — 마이크 오프셋 실측(lidar_calibrate.py
-            # --audio-offset)의 재료이고, 계속 한쪽으로 치우치면 그만큼 마이크가 틀어져 있다.
-            print(f"       라이다: 방위={track['azimuth_deg']:+.1f}° "
-                  f"(소리와 {track['bearing_error_deg']:+.1f}° 차이) "
-                  f"창=±{track['window_deg']:.0f}° 점={track['points']} "
-                  f"접근={track['closing_mps'] if track['closing_mps'] is None else round(track['closing_mps'], 1)}m/s")
+            # 라이다가 본 방위와 **물어본 방향**의 차이. 소리 방향으로 물었을 때는 이 값이
+            # 마이크 오프셋 실측(lidar_calibrate.py --audio-offset)의 재료가 된다.
+            closing = track.get("closing_mps")
+            print(f"       라이다: 거리={track['distance_m']:.1f}m "
+                  f"방위={track['azimuth_deg']:+.1f}° "
+                  f"({query[2]} 기준 {track['bearing_error_deg']:+.1f}° 차이) "
+                  f"창=±{track['window_deg']:.1f}° 점={track['points']} "
+                  f"접근={'—' if closing is None else f'{closing:+.1f}m/s'}")
         state.trigger(camera, top_class,
                       LOC_LABEL_KO[camera] if theta_ok else "방향 미확정",
                       detection, level, distance, blind,
                       theta=doa if theta_ok else None,
-                      sigma=sigma, detail=detail, match=track)
+                      sigma=sigma, detail=detail, match=track, query=query)
 
 
 def track_usable(track) -> bool:
@@ -506,8 +550,30 @@ def track_usable(track) -> bool:
     return bool(track) and bool(track.get("confirmed") or track.get("blind"))
 
 
-def lidar_match(class_name: str, doa_deg: float, sigma_deg: float = None):
-    """그 방향에서 들린 음원까지의 거리(추적 결과). 쓸 수 없으면 None = 위치 미확정.
+def distance_query(doa_deg: float, sigma_deg: float, detection):
+    """라이다에게 **어느 방향을 얼마나 좁게** 물어볼지 정한다.
+
+    반환: (조회 방위, 각도 창 | None, 근거 라벨)
+
+    최종 파이프라인의 핵심이 이 선택이다.
+      · 카메라가 YOLO로 대상을 지목했으면 → **박스에서 환산한 방위**, 창은 박스 폭(1~6°).
+        그 방향에 차가 여러 대 있어도 지목된 그 물체를 잰다 → 근거 "카메라"
+      · 지목하지 못했으면 → 소리 방향, 창은 σ에서 만든다(8~30°). 거리는 나오지만
+        "그 물체가 소리를 낸 물체"라는 보장은 약하다 → 근거 "소리"
+    창이 None이면 lidar_distance_match가 σ로 만든다.
+    """
+    if detection and detection.get("bearing_deg") is not None:
+        half = float(detection.get("half_width_deg") or 2.0)
+        # 박스 폭에 여유를 조금 준다 — 박스가 대상을 꽉 못 감싸거나(가려짐) 1초 사이
+        # 대상이 움직인 만큼을 흡수하려는 것. 너무 좁히면 매 프레임 놓친다.
+        window = min(12.0, max(3.0, half * 1.6))
+        return float(detection["bearing_deg"]), window, "카메라"
+    return float(doa_deg), None, "소리"
+
+
+def lidar_match(class_name: str, theta_deg: float, sigma_deg: float = None,
+                window_deg: float = None):
+    """그 방향에서 음원까지의 거리(추적 결과). 쓸 수 없으면 None = 위치 미확정.
 
     (2026-10-15) 단발 match_distance에서 TargetTracker로 바뀌었다. 돌려주는 dict는
     거리·blind 계약이 그대로고, closing_mps/ttc_s/azimuth_deg가 더 붙는다.
@@ -520,8 +586,8 @@ def lidar_match(class_name: str, doa_deg: float, sigma_deg: float = None):
         _lidar_tracker.drop(class_name)
         return None
     points, scan_id = _lidar_scanner.snapshot()
-    track = _lidar_tracker.update(class_name, doa_deg, points,
-                                  sigma_deg=sigma_deg, scan_id=scan_id)
+    track = _lidar_tracker.update(class_name, theta_deg, points, sigma_deg=sigma_deg,
+                                  scan_id=scan_id, window_deg=window_deg)
     return track if track_usable(track) else None
 
 
@@ -543,7 +609,7 @@ def approach_detail(match):
 
 def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection,
                  rms_db: float, score: float, theta_ok: bool = True,
-                 sigma_deg: float = None):
+                 sigma_deg: float = None, query=None):
     """(level, distance, blind, detail)을 정한다. 규칙 자체는 alert_policy.py에 있다.
 
     detail은 배너 오른쪽에 붙는 짧은 문구다 — 왜 이 단계가 됐는지를 운전자가 읽을 수 있게
@@ -566,7 +632,8 @@ def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection
 
     # ⚠️ 방향을 못 믿으면 라이다도 조회하지 않는다. 그 각도로 점군을 뒤지면 엉뚱한
     #    방향의 물체까지 거리를 재서, 틀린 방향에 그럴듯한 숫자를 붙이게 된다.
-    match = (lidar_match(class_name, doa_deg, sigma_deg)
+    theta_q, window_q, _source = query or distance_query(doa_deg, sigma_deg, detection)
+    match = (lidar_match(class_name, theta_q, sigma_deg, window_q)
              if theta_ok and class_name in LIDAR_MATCH_CLASSES else None)
 
     if class_name == "siren":
@@ -629,9 +696,9 @@ def refresh_lidar_targets(state: SharedState):
     if not lidar_ok:
         return None, False
     points, scan_id = _lidar_scanner.snapshot()
-    for name, theta, sigma in state.lidar_queries():
+    for name, theta, sigma, window in state.lidar_queries():
         state.apply_lidar(name, _lidar_tracker.update(
-            name, theta, points, sigma_deg=sigma, scan_id=scan_id))
+            name, theta, points, sigma_deg=sigma, scan_id=scan_id, window_deg=window))
     return points, True
 
 
