@@ -425,8 +425,14 @@ class SharedState:
                     track["blind"] or alert_policy.is_approaching(track)):
                 entry["level"] = "경고"
                 entry["detail"] = "사각지대" if track["blind"] else "접근 중"
-            elif entry["detail"] in ("차량 확정", "위치 추적", None):
-                entry["detail"] = approach_detail(track) or entry["detail"]
+            elif entry["detail"] in ("차량 확정", "위치 추적", "위치 미확정", None):
+                # ⚠️ "위치 미확정"을 빠뜨리면 안 된다. 감지 순간에는 추적이 아직 확정 전이라
+                #    배너가 "위치 미확정"으로 뜨는데, 0.2초 뒤 거리가 붙어도 다음 젯슨
+                #    패킷(최대 1초)까지 그 문구가 남아 **거리 37m를 띄운 채 "위치 미확정"**이라고
+                #    말하게 된다. 화면이 스스로와 모순되는 상태다 (2026-10-15 시뮬레이션에서 발견).
+                entry["detail"] = (approach_detail(track)
+                                   or ("차량 확정" if entry["distance"] is not None
+                                       else entry["detail"]))
 
     def snapshot(self):
         """(표시할 카메라, 우선순위 순 대상 목록, 1위의 detection)을 돌려준다.

@@ -275,8 +275,10 @@ def main():
     truth = r["scanner"].truth_distance()
     check("감지가 유지된다", t is not None, f"대상 {len(r['targets'])}건")
     if t is not None:
+        # 허용 오차 1.0m — 지연 보정(2026-10-15) 이후 잔차는 0.1~0.2m 수준이다. 느슨하게 두면
+        # 평활화 지연이 되돌아와도 통과해버린다(보정 전에는 +1.2m였다).
         err = None if t["distance"] is None else abs(t["distance"] - truth)
-        check("거리가 실제와 맞는다", err is not None and err < 2.5,
+        check("거리가 실제와 맞는다", err is not None and err < 1.0,
               f"화면={None if t['distance'] is None else round(t['distance'], 1)}m "
               f"실제={truth:.1f}m")
         check("라이다 방위를 화면에 전달", t.get("theta_lidar") is not None
@@ -327,7 +329,7 @@ def main():
               t3.get("window_deg") is not None and t3["window_deg"] <= 8.0,
               f"±{t3.get('window_deg')}°")
         err3 = None if t3["distance"] is None else abs(t3["distance"] - truth3)
-        check("미끼(12m) 대신 지목한 물체를 잰다", err3 is not None and err3 < 2.5,
+        check("미끼(12m) 대신 지목한 물체를 잰다", err3 is not None and err3 < 1.0,
               f"화면={None if t3['distance'] is None else round(t3['distance'], 1)}m "
               f"실제={truth3:.1f}m (미끼 12.0m)")
         check("전방 카메라로 전환", r3["camera"] == "front", f"camera={r3['camera']}")

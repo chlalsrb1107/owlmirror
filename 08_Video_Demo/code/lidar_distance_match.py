@@ -115,6 +115,10 @@ class LidarConfig:
     closing_window_sec: float = 2.0   # 접근 속도를 재는 과거 구간
     closing_min_span_sec: float = 0.5  # 이보다 짧은 구간으로는 속도를 내지 않는다
     closing_min_samples: int = 4
+    # 표시 지연 보정(m). 평활화(EMA)와 스캔 나이 때문에 화면 거리가 실제보다 **멀게** 나온다 —
+    # 운전자가 여유 있다고 느끼는 쪽이라 위험한 방향의 오차다. 접근 속도를 알면 그만큼 되돌릴 수
+    # 있고, 과보정을 막기 위해 이 값까지만 보정한다. 0이면 보정하지 않는다.
+    lag_compensation_max_m: float = 2.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "LidarConfig":
@@ -651,15 +655,45 @@ class TargetTracker:
         slope = float(np.polyfit(t - t[0], d, 1)[0])
         return -slope
 
+    def _measure_dt(self, tr) -> float:
+        """관측 간격(초) 추정 — 보정량 계산에 쓴다. 표본이 없으면 VLP-16 기본 10Hz."""
+        samples = tr.get("samples") or []
+        if len(samples) < 2:
+            return 0.1
+        gaps = np.diff([t for t, _ in samples])
+        return float(np.median(gaps)) if gaps.size else 0.1
+
     def _as_result(self, tr, now):
         cfg = self.cfg
         closing = self._closing(tr, cfg)
         ttc = None
         if closing is not None and closing > 0.5 and tr["distance_m"]:
             ttc = tr["distance_m"] / closing
+
+        # ---- 표시 지연 보정 ----------------------------------------------------
+        # 보이는 거리가 실제보다 **멀다**. 두 가지가 겹친다.
+        #   · 측정 나이 : 마지막 스캔 이후 흐른 시간만큼 대상이 더 다가왔다
+        #   · 평활화    : EMA의 정상상태 지연 = (1-a)/a x 관측 간격
+        # 접근 속도를 알면 그만큼 되돌릴 수 있다. 표본이 모자라 closing이 없으면 보정하지
+        # 않고(모르면 손대지 않는다), 과보정을 막으려 상한을 둔다.
+        # ⚠️ 보정값은 **표시용**이고 samples에는 넣지 않는다 — 넣으면 보정이 다음 기울기에
+        #    먹혀들어 스스로를 증폭시킨다.
+        distance = tr["distance_m"]
+        lag_sec = 0.0
+        if (distance is not None and closing is not None and not tr["blind"]
+                and cfg.lag_compensation_max_m > 0):
+            a = max(cfg.track_ema_alpha, 1e-6)
+            lag_sec = (now - tr["last_at"]) + ((1.0 - a) / a) * self._measure_dt(tr)
+            shift = max(-cfg.lag_compensation_max_m,
+                        min(cfg.lag_compensation_max_m, closing * lag_sec))
+            distance = max(0.0, distance - shift)
+            if closing > 0.5:
+                ttc = distance / closing
+
         out = dict(tr["match"])
         out.update({
-            "distance_m": tr["distance_m"], "blind": tr["blind"],
+            "distance_m": distance, "distance_raw_m": tr["distance_m"],
+            "lag_sec": lag_sec, "blind": tr["blind"],
             "closing_mps": closing, "ttc_s": ttc,
             "hits": tr["hits"], "confirmed": tr["hits"] >= cfg.track_confirm_hits,
             "age_sec": now - tr["first_at"],
@@ -794,6 +828,29 @@ def run_candidate_test() -> bool:
     ok &= good
     print(f"  {'가드레일보다 방향 맞는 차량':30s} expected=26m  got={_fmt(got)}  [{_pf(good)}]")
 
+    # 좁은 창(카메라 지목)이 **실제로** 기여하는가 — 대조군 없이는 "어차피 맞았을 일"을
+    # 검증했다고 착각하기 쉽다. 같은 장면에서 두 경로를 200번씩 돌려 비교한다.
+    #   배치: 대상(사이렌) -15°/25m, 미끼(주차 차량) -24°/12m
+    #   소리 경로는 theta가 σ=6으로 흔들려 미끼가 창 중앙에 오는 날이 있다 → 때때로 틀린다
+    #   카메라 경로는 박스 방위(±3.4°)로 고정 조회 → 항상 대상
+    scene2 = np.concatenate([
+        _make_road_scene(mount_height_m=1.7, car_range_m=25.0, car_azimuth_deg=-15.0),
+        np.array(_vehicle_points(12.0, -24.0, 1.7), dtype=np.float32)])
+    gen = np.random.default_rng(0)
+    audio_hit = cam_hit = 0
+    for _ in range(200):
+        theta = -15.0 + gen.normal(0.0, 6.0)
+        m_a = match_distance(scene2, theta, sigma_deg=6.0, mount_height_m=1.7)
+        m_c = match_distance(scene2, -15.0, angle_margin_deg=3.4, mount_height_m=1.7)
+        audio_hit += bool(m_a and not m_a["blind"]
+                          and abs(_wrap180(m_a["azimuth_deg"] + 15.0)) < 5.0)
+        cam_hit += bool(m_c and not m_c["blind"]
+                        and abs(_wrap180(m_c["azimuth_deg"] + 15.0)) < 5.0)
+    good = cam_hit == 200 and audio_hit < 200
+    ok &= good
+    print(f"  {'카메라 지목이 미끼를 걸러낸다':30s} "
+          f"카메라 {cam_hit}/200, 소리 {audio_hit}/200  [{_pf(good)}]")
+
     # 라이다가 본 방위를 같이 돌려주는지 (화면이 소리 방향 대신 이걸 쓴다)
     got = match_distance(_make_fake_points(14.0, 22.0, n=40), 0.0, sigma_deg=15.0)
     good = got is not None and abs(got["azimuth_deg"] - 14.0) < 3.0
@@ -871,6 +928,22 @@ def run_tracker_test() -> bool:
     good = res_fixed is None
     ok &= good
     print(f"  {'follow 없으면 놓친다(대조군)':30s} got={_fmt(res_fixed)}  [{_pf(good)}]")
+
+    # 표시 지연 보정 — 10m/s로 다가오는 대상을 EMA로 평활화하면 화면이 실제보다 멀게 나온다.
+    # 보정 후 잔차가 보정 전보다 작아야 한다(그리고 부호가 뒤집히지 않아야 한다).
+    tr_lag = TargetTracker()
+    truth = None
+    res_lag = None
+    for i in range(1, 21):
+        truth = 60.0 - 1.0 * i          # 0.1초마다 1m씩 = 10m/s
+        res_lag = tr_lag.update("siren", 0.0, _make_fake_points(0.0, truth, n=40),
+                                sigma_deg=6.0, scan_id=i, now=t0 + 0.1 * i)
+    err_raw = res_lag["distance_raw_m"] - truth
+    err_shown = res_lag["distance_m"] - truth
+    good = abs(err_shown) < abs(err_raw) and err_shown > -1.0
+    ok &= good
+    print(f"  {'지연 보정이 오차를 줄인다':30s} "
+          f"보정전={err_raw:+.2f}m 보정후={err_shown:+.2f}m  [{_pf(good)}]")
 
     # 멀어지는 물체는 closing이 음수
     tracker2 = TargetTracker()
