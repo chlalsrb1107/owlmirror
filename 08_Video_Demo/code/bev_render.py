@@ -631,14 +631,27 @@ def render(camera_frame_bgr, camera_name, targets, points=None,
             text.add(tgt.get("detail") or "사각지대", (float(gx), float(gy) + _px(26)), 18,
                      RED, anchor="mm")
         elif tgt["distance"] is not None:
-            cluster = _select_cluster_points(ground_filtered, theta, tgt["distance"],
-                                             lidar.DEFAULT_ANGLE_MARGIN_DEG)
-            cx, cy = draw_cluster(img, theta, tgt["distance"], col, cluster,
+            # (2026-10-15) 물체는 **라이다가 실제로 본 방위**에 그린다. 소리 방향은 ±5~7°
+            # (주행 중에는 더) 흩어지지만 라이다 방위는 그 물체의 실측값이다 — 거리를 라이다로
+            # 재면서 위치만 소리 방향에 찍으면, 화면의 점 클러스터가 실제 점군과 어긋난다.
+            theta_obj = tgt.get("theta_lidar")
+            theta_obj = theta if theta_obj is None else theta_obj
+            cluster = _select_cluster_points(
+                ground_filtered, theta_obj, tgt["distance"],
+                tgt.get("window_deg") or lidar.DEFAULT_ANGLE_MARGIN_DEG)
+            cx, cy = draw_cluster(img, theta_obj, tgt["distance"], col, cluster,
                                   pulse=(tgt["level"] == "경고"))
             _glyph(img, kind, cx, cy - _px(38), 0.52 * TEXT_SCALE, col)
             left = cx < CX
-            text.add(f"{tgt['distance']:.0f}m", (cx - _px(44) if left else cx + _px(44), cy + _px(4)),
-                     _ts(28), col, anchor="rm" if left else "lm")
+            tx = cx - _px(44) if left else cx + _px(44)
+            anchor = "rm" if left else "lm"
+            text.add(f"{tgt['distance']:.0f}m", (tx, cy + _px(4)), _ts(28), col, anchor=anchor)
+            # 거리 아래에 변화량을 붙인다 — 숫자 하나로는 다가오는지 멀어지는지 모른다.
+            # (⚠️ PIL은 anchor를 준 여러 줄 텍스트를 못 그려서 줄마다 따로 얹는다)
+            closing = tgt.get("closing")
+            if closing is not None and abs(closing) >= 1.0:
+                text.add(f"{'↓' if closing > 0 else '↑'}{abs(closing):.0f}m/s",
+                         (tx, cy + _px(30)), _ts(20), col, anchor=anchor)
         else:
             draw_wedge(img, theta, max(2.0 * tgt.get("sigma", 12.0), 16.0), col, ground_filtered)
             gx, gy = to_px(theta, 30.0)
@@ -708,9 +721,13 @@ def run_selftest(outdir: Path):
     cam = np.full((1200, 2048, 3), 26, dtype=np.uint8)
     cv2.putText(cam, "CAMERA", (700, 640), cv2.FONT_HERSHEY_SIMPLEX, 5.0, (70, 70, 70), 8)
 
-    def tgt(cls, theta, level, dist=None, blind=False, sigma=12.0, loc="좌측", detail=None):
+    def tgt(cls, theta, level, dist=None, blind=False, sigma=12.0, loc="좌측", detail=None,
+            theta_lidar=None, closing=None, window_deg=None):
         return {"class_name": cls, "theta": theta, "level": level, "distance": dist,
-                "blind": blind, "sigma": sigma, "loc": loc, "detail": detail}
+                "blind": blind, "sigma": sigma, "loc": loc, "detail": detail,
+                # (2026-10-15) 라이다 추적에서 오는 값들 — 물체는 소리 방향이 아니라
+                # theta_lidar(실측 방위)에 그리고, closing이 있으면 거리 아래 변화량을 붙인다.
+                "theta_lidar": theta_lidar, "closing": closing, "window_deg": window_deg}
 
     amb = {"label": "Ambulance", "conf": 0.92, "box": (760, 380, 1290, 860)}
     moto_det = {"label": "Motorcycle", "conf": 0.87, "box": (900, 500, 1330, 880)}
@@ -743,6 +760,16 @@ def run_selftest(outdir: Path):
          _fake_scene(94, 28.0), True, amb),
         ("10_lidar_down", "left",
          [tgt("siren", 94, "경고", detail="위치 미확정")], None, False, amb),
+        # (2026-10-15) 라이다 추적 — 소리 방향(94°)과 라이다 실측 방위(88°)가 6° 어긋난
+        # 상황. 점 클러스터와 거리 라벨이 **88° 쪽**에 붙어야 맞다(= 실제 점군과 일치).
+        ("11_siren_approach", "left",
+         [tgt("siren", 94, "경고", 24.0, detail="접근 7m/s",
+              theta_lidar=88.0, closing=7.0, window_deg=12.0)],
+         _fake_scene(88, 24.0), True, amb),
+        ("12_moto_receding", "right",
+         [tgt("motorcycle", -100, "경고", 16.0, loc="우측", detail="위치 추적",
+              theta_lidar=-97.0, closing=-5.0, window_deg=14.0)],
+         _fake_scene(-97, 16.0), True, moto_det),
     ]
 
     for name, camera, targets, points, ok, det in scenes:
@@ -752,8 +779,10 @@ def run_selftest(outdir: Path):
         cv2.imwrite(str(path), img)
         print(f"  {path}")
     print(f"\n[selftest] {len(scenes)}개 렌더링 완료 — 이미지 뷰어로 열어 확인하세요.")
-    print("[selftest] 특히 확인할 것: 좌측 감지(theta=+94)가 화면 **왼쪽**에 그려지는지 "
-          "(각도 규약 뒤집힘 검증)")
+    print("[selftest] 특히 확인할 것:")
+    print("  · 좌측 감지(theta=+94)가 화면 **왼쪽**에 그려지는지 (각도 규약 뒤집힘 검증)")
+    print("  · 11/12번에서 점 클러스터가 소리 방향이 아니라 라이다 실측 방위에 붙는지,")
+    print("    거리 아래 ↓7m/s(접근) · ↑5m/s(멀어짐)가 보이는지")
     return True
 
 

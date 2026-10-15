@@ -145,20 +145,24 @@ MAX_EXPOSURE_US = 8000.0
 MAX_GAIN_DB = 16.0  # MER2-240-159U3C 최대치
 
 # 프레임레이트 상한(Hz). 노출 상한을 걸면 센서가 122fps까지 올라가는데, 4대면
-# 4 x 122 x 2.46MB = 약 1,200 MB/s로 USB 대역폭을 넘는다. 더 나쁜 건 카메라 2대가
-# 라이다 이더넷(r8152)과 같은 5Gbps 구간(~400MB/s)을 공유한다는 점 — 포화되면
-# 라이다 UDP 패킷이 유실되고 거리 매칭이 통째로 망가진다.
+# 4 x 122 x 2.46MB = 약 1,200 MB/s로 USB 대역폭을 넘는다. 더 나쁜 건 카메라 3대가
+# 라이다 이더넷(r8152)과 같은 5Gbps 구간(~400MB/s)을 공유한다는 점(나머지 1대만 노트북
+# USB3 포트에 직결) — 포화되면 라이다 UDP 패킷이 유실되고 거리 매칭이 통째로 망가진다.
+# 30fps 기준 독 구간 부하는 약 222MB/s(카메라 3 x 73.7 + 라이다 0.9)로 여유가 절반뿐이라,
+# 이 캡을 올리거나 남은 1대까지 독으로 옮기면 라이다 유실이 먼저 터진다.
 # 30fps면 4대 합쳐 약 295MB/s이고, 데모 표시용으로 충분하다.
 MAX_FRAMERATE_HZ = 30.0
 _calib_cache = {}
 
-# LiDAR 연동은 실물로 검증된 적이 없어, main()에서 스캐너 시작에 실패하면 이 값을 False로
-# 내려 이후 모든 감지가 8/25 버전과 동일하게 "주의"로만 표시되도록 자동 폴백한다.
+# LiDAR 연동은 main()에서 스캐너 시작에 실패하면 이 값을 False로 내려, 거리·클러스터만 빠진
+# 폴백(방향만 표시)으로 자동 전환한다.
 LIDAR_AVAILABLE = True
 _lidar_scanner = None
-# 노면에서 라이다 원점까지의 높이(m). 지면 제거 기준이라 이 값이 틀리면 노면이 안 걸러지거나
-# (너무 크면) 실제 차량까지 잘려나간다. ⚠️ 루프랙 장착 후 줄자로 실측해 교체할 것.
-LIDAR_MOUNT_HEIGHT_M = lidar.MOUNT_HEIGHT_M
+# (2026-10-15) 단발 매칭 대신 추적기를 쓴다 — 거리 안정화·접근 속도·놓친 스캔 coast.
+# 감지 스레드와 표시 루프 양쪽에서 호출하므로 내부에 락이 있다(TargetTracker).
+_lidar_tracker = lidar.TargetTracker()
+# 장착값(높이·요 오프셋)은 이제 소스가 아니라 08_Video_Demo/config/lidar_mount.json에서 온다.
+# lidar_calibrate.py가 현장에서 실측해 써주는 파일이고, lidar 모듈이 import 시 자동 적용한다.
 
 
 def load_detector():
@@ -318,11 +322,14 @@ class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         # class_name -> {"camera": str, "loc": str, "detection": dict|None,
-        #                "level": "주의"|"경고", "distance": float|None, "blind": bool, "until": float}
+        #                "level": "주의"|"경고", "distance": float|None, "blind": bool,
+        #                "theta": float|None(소리 방향), "theta_lidar": float|None(라이다 실측 방위),
+        #                "closing": float|None, "window_deg": float|None, "until": float}
         self.active = {}
 
     def trigger(self, camera: str, class_name: str, loc: str, detection,
-                level: str, distance, blind: bool, theta: float, sigma: float, detail: str):
+                level: str, distance, blind: bool, theta: float, sigma: float, detail: str,
+                match=None):
         now = time.time()
         hold = HOLD_SEC_BY_CLASS.get(class_name, HOLD_SEC)
         with self.lock:
@@ -330,7 +337,62 @@ class SharedState:
                 "class_name": class_name, "camera": camera, "loc": loc, "detection": detection,
                 "level": level, "distance": distance, "blind": blind, "detail": detail,
                 "theta": theta, "sigma": sigma, "until": now + hold,
+                "theta_lidar": (match or {}).get("azimuth_deg") if not blind else None,
+                "window_deg": (match or {}).get("window_deg"),
+                "closing": (match or {}).get("closing_mps"),
+                "ttc": (match or {}).get("ttc_s"),
             }
+
+    # ---- 라이다 추적 갱신 (표시 루프가 매 프레임 호출) ------------------------
+    # 젯슨 패킷은 약 1초에 한 번 오는데 라이다는 10Hz로 돈다. 패킷이 올 때만 거리를
+    # 갱신하면 그 1초 동안 화면의 숫자와 점 클러스터가 과거를 가리킨다 — 50km/h면 14m를
+    # 지나간 뒤다. 그래서 표시 루프가 매 프레임 추적을 돌려 거리만 따로 갱신한다.
+    def lidar_queries(self):
+        """(class_name, theta, sigma) — 지금 거리를 갱신해야 하는 감지 목록."""
+        with self.lock:
+            return [(name, v["theta"], v.get("sigma"))
+                    for name, v in self.active.items()
+                    if v["theta"] is not None and name in LIDAR_MATCH_CLASSES]
+
+    def apply_lidar(self, class_name: str, track):
+        """추적 결과를 표시 상태에 반영한다.
+
+        단계(level)는 **올리기만 한다.** 표시 루프에서 내리면, 운전자가 보고 있는 경고가
+        라이다가 한 스캔 놓친 순간에 주의로 떨어졌다 다시 올라가며 깜빡이게 된다.
+        판정의 책임은 감지 스레드(decide_alert)에 있고 여기서는 숫자를 최신으로 맞출 뿐이다.
+        """
+        with self.lock:
+            entry = self.active.get(class_name)
+            if entry is None:
+                return
+            if track is None:
+                # 추적이 끊겼다(coast 구간도 지났다) — 숫자를 지운다. 사라진 물체의
+                # 마지막 거리를 계속 띄워두는 쪽이 아무것도 안 띄우는 것보다 나쁘다.
+                entry.update({"distance": None, "blind": False, "theta_lidar": None,
+                              "closing": None, "ttc": None})
+                return
+            if not track_usable(track):
+                return  # 아직 확정 전 — 직전 표시를 그대로 둔다(깜빡임 방지)
+            # ⚠️ 정책이 이 대상의 **위치**를 인정했을 때만 숫자를 붙인다.
+            #    눈으로 확인되지 않은 오토바이(주의·"사각지대 위험")는 그 방향의 점 덩어리가
+            #    오토바이라는 보장이 없어서 alert_policy가 일부러 거리를 비워둔다. 여기서
+            #    라이다 거리를 밀어넣으면 주차 차량까지의 거리를 "오토바이 12m"로 바꿔 쓰는 셈이다.
+            #    사각지대(6m 이내)와 접근 중은 예외 — 그 둘은 그 자체로 단계를 올리는 근거다.
+            if not (entry["distance"] is not None or entry["blind"]
+                    or track["blind"] or alert_policy.is_approaching(track)):
+                return
+            entry.update({
+                "distance": track["distance_m"], "blind": track["blind"],
+                "theta_lidar": None if track["blind"] else track.get("azimuth_deg"),
+                "window_deg": track.get("window_deg"),
+                "closing": track.get("closing_mps"), "ttc": track.get("ttc_s"),
+            })
+            if class_name == "motorcycle" and entry["level"] != "경고" and (
+                    track["blind"] or alert_policy.is_approaching(track)):
+                entry["level"] = "경고"
+                entry["detail"] = "사각지대" if track["blind"] else "접근 중"
+            elif entry["detail"] in ("차량 확정", "위치 추적", None):
+                entry["detail"] = approach_detail(track) or entry["detail"]
 
     def snapshot(self):
         """(표시할 카메라, 우선순위 순 대상 목록, 1위의 detection)을 돌려준다.
@@ -400,10 +462,14 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
         else:
             camera = last_camera
 
+        # 방향 불확실성(sigma)이 그대로 라이다 각도 창의 폭이 된다 — 또렷한 방향이면
+        # 창을 좁혀 엉뚱한 물체를 덜 집고, 흐릿하면 넓혀 놓치지 않는다.
+        sigma = float(packet.get("sigma", 12.0))
         detection = (run_detection(detector, camera, top_class)
                      if top_class in DETECTION_CLASSES else None)
         level, distance, blind, detail = decide_alert(policy, top_class, doa, detection,
-                                                      rms_db, score, theta_ok)
+                                                      rms_db, score, theta_ok, sigma)
+        track = _lidar_tracker.get(top_class) if top_class in LIDAR_MATCH_CLASSES else None
         # 방향을 모를 때 "위치 미확정"까지 덧붙이면 배너에 같은 말이 두 번 나온다
         # ("경고 · 방향 미확정 · 위치 미확정"). 방향 쪽 문구만 남긴다.
         if not theta_ok and detail == "위치 미확정":
@@ -416,27 +482,68 @@ def detection_worker(state: SharedState, receiver: AudioDetectionReceiver, detec
               f"(수음~표시 지연 {latency_ms:.0f}ms)")
         print(f"    -> {camera} 카메라로 전환, level={level} ({detail}), "
               f"distance={distance}, blind={blind}, detection={detection}")
+        if track_usable(track) and not track["blind"]:
+            # 라이다가 본 방위와 소리 방향의 차이 — 마이크 오프셋 실측(lidar_calibrate.py
+            # --audio-offset)의 재료이고, 계속 한쪽으로 치우치면 그만큼 마이크가 틀어져 있다.
+            print(f"       라이다: 방위={track['azimuth_deg']:+.1f}° "
+                  f"(소리와 {track['bearing_error_deg']:+.1f}° 차이) "
+                  f"창=±{track['window_deg']:.0f}° 점={track['points']} "
+                  f"접근={track['closing_mps'] if track['closing_mps'] is None else round(track['closing_mps'], 1)}m/s")
         state.trigger(camera, top_class,
                       LOC_LABEL_KO[camera] if theta_ok else "방향 미확정",
                       detection, level, distance, blind,
                       theta=doa if theta_ok else None,
-                      sigma=float(packet.get("sigma", 12.0)), detail=detail)
+                      sigma=sigma, detail=detail, match=track)
 
 
-def lidar_match(doa_deg: float):
-    """그 방향의 LiDAR 매칭 결과. 라이다를 쓸 수 없으면 None (= 위치 미확정과 같은 취급)."""
+def track_usable(track) -> bool:
+    """이 추적 결과를 화면·판정에 써도 되는가.
+
+    한 스캔에 한 번 잡힌 것만으로는 쓰지 않는다 — 노이즈 한 덩어리로 "12m에 차량 확정"이
+    떠버리면 화면이 거짓말을 한다. 서로 다른 스캔에서 track_confirm_hits(기본 2)번
+    잡혀야 확정으로 본다. 라이다는 10Hz, 표시 루프는 30Hz라 보통 0.1~0.2초면 확정된다.
+    """
+    return bool(track) and bool(track.get("confirmed") or track.get("blind"))
+
+
+def lidar_match(class_name: str, doa_deg: float, sigma_deg: float = None):
+    """그 방향에서 들린 음원까지의 거리(추적 결과). 쓸 수 없으면 None = 위치 미확정.
+
+    (2026-10-15) 단발 match_distance에서 TargetTracker로 바뀌었다. 돌려주는 dict는
+    거리·blind 계약이 그대로고, closing_mps/ttc_s/azimuth_deg가 더 붙는다.
+    """
     if not LIDAR_AVAILABLE or _lidar_scanner is None:
         return None
     # start()가 성공했다는 것만으로는 수신 스레드가 살아있다는 보장이 안 된다 —
-    # 스레드가 죽으면 latest_points()가 계속 옛 스캔을 돌려줘서 거리가 멈춘 채로 표시된다.
+    # 스레드가 죽으면 옛 스캔이 계속 돌아와 거리가 멈춘 채로 표시된다.
     if not _lidar_scanner.healthy():
+        _lidar_tracker.drop(class_name)
         return None
-    return lidar.match_distance(_lidar_scanner.latest_points(), doa_deg,
-                                mount_height_m=LIDAR_MOUNT_HEIGHT_M)
+    points, scan_id = _lidar_scanner.snapshot()
+    track = _lidar_tracker.update(class_name, doa_deg, points,
+                                  sigma_deg=sigma_deg, scan_id=scan_id)
+    return track if track_usable(track) else None
+
+
+def approach_detail(match):
+    """접근/후퇴를 한 마디로. 모르면 None.
+
+    거리 숫자는 배너가 따로 보여주므로, 여기서는 **변화**만 말한다 — 운전자가 알아야 할
+    것은 20m라는 사실보다 그 20m가 줄고 있다는 사실이다.
+    """
+    if not match or match.get("closing_mps") is None:
+        return None
+    closing = float(match["closing_mps"])
+    if closing >= alert_policy.APPROACH_MPS:
+        return f"접근 {closing:.0f}m/s"
+    if closing <= -alert_policy.APPROACH_MPS:
+        return "멀어짐"
+    return None
 
 
 def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection,
-                 rms_db: float, score: float, theta_ok: bool = True):
+                 rms_db: float, score: float, theta_ok: bool = True,
+                 sigma_deg: float = None):
     """(level, distance, blind, detail)을 정한다. 규칙 자체는 alert_policy.py에 있다.
 
     detail은 배너 오른쪽에 붙는 짧은 문구다 — 왜 이 단계가 됐는지를 운전자가 읽을 수 있게
@@ -459,21 +566,26 @@ def decide_alert(policy: AlertPolicy, class_name: str, doa_deg: float, detection
 
     # ⚠️ 방향을 못 믿으면 라이다도 조회하지 않는다. 그 각도로 점군을 뒤지면 엉뚱한
     #    방향의 물체까지 거리를 재서, 틀린 방향에 그럴듯한 숫자를 붙이게 된다.
-    match = (lidar_match(doa_deg)
+    match = (lidar_match(class_name, doa_deg, sigma_deg)
              if theta_ok and class_name in LIDAR_MATCH_CLASSES else None)
 
     if class_name == "siren":
-        level, distance, blind = policy.siren_level(match)
+        level, distance, blind = policy.siren_level(match, rms_db)
         if blind:
             detail = "사각지대"
         elif distance is not None:
-            detail = "차량 확정"
+            # 접근 중이라는 사실이 "차량 확정"보다 운전자에게 쓸모 있다
+            detail = approach_detail(match) or "차량 확정"
         else:
             detail = "위치 미확정"
         return level, distance, blind, detail
 
     # motorcycle — 잡았나(경고·추적) / 가까워지나(경고·근접) / 모르나(주의) 셋뿐이다
-    return policy.motorcycle_level(match, detection is not None, rms_db)
+    level, distance, blind, reason = policy.motorcycle_level(
+        match, detection is not None, rms_db)
+    if reason == "위치 추적":
+        reason = approach_detail(match) or reason
+    return level, distance, blind, reason
 
 
 def monitor_geometry(name: str):
@@ -498,6 +610,29 @@ def monitor_geometry(name: str):
                 w, h, x, y = (int(m.group(i)) for i in (1, 2, 3, 4))
                 return x, y, w, h
     return None
+
+
+def refresh_lidar_targets(state: SharedState):
+    """유지 중인 감지들의 거리를 라이다 속도로 다시 재고, 화면에 그릴 포인트를 돌려준다.
+
+    반환: (points | None, lidar_ok)
+
+    젯슨 패킷은 약 1초에 한 번인데 라이다는 10Hz로 돈다. 패킷이 올 때만 거리를 갱신하면
+    그 1초 동안 화면의 숫자가 과거를 가리킨다(50km/h면 14m 전). 그래서 표시 루프가 매
+    프레임 이걸 호출해 거리만 따로 따라가게 한다. 같은 scan_id는 추적기가 중복으로 세지
+    않으므로 30Hz로 물어도 "한 스캔으로 확정" 같은 사고는 생기지 않는다.
+
+    LiDAR는 살아있을 때만 포인트를 넘긴다 — 죽은 스캐너가 들고 있는 옛 스캔을 그대로
+    그리면 지도가 몇 초 전 세상을 보여주면서도 멀쩡해 보인다.
+    """
+    lidar_ok = LIDAR_AVAILABLE and _lidar_scanner is not None and _lidar_scanner.healthy()
+    if not lidar_ok:
+        return None, False
+    points, scan_id = _lidar_scanner.snapshot()
+    for name, theta, sigma in state.lidar_queries():
+        state.apply_lidar(name, _lidar_tracker.update(
+            name, theta, points, sigma_deg=sigma, scan_id=scan_id))
+    return points, True
 
 
 def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None,
@@ -553,10 +688,7 @@ def video_loop(state: SharedState, receiver: AudioDetectionReceiver = None,
             time.sleep(0.05)
             continue
 
-        # LiDAR는 살아있을 때만 포인트를 넘긴다. 죽은 스캐너가 들고 있는 옛 스캔을 그대로
-        # 그리면 지도가 몇 초 전 세상을 보여주면서도 멀쩡해 보인다.
-        lidar_ok = LIDAR_AVAILABLE and _lidar_scanner is not None and _lidar_scanner.healthy()
-        points = _lidar_scanner.latest_points() if lidar_ok else None
+        points, lidar_ok = refresh_lidar_targets(state)
 
         canvas = bev_render.render(
             cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), camera, targets, points,
@@ -600,6 +732,17 @@ def parse_args():
     parser.add_argument("--monitor", default=None, metavar="NAME",
                         help="표시할 모니터 이름(예: HDMI-1-0). 확장 배치에서 운전자용 "
                              "외장 디스플레이를 지정할 때 사용. `xrandr --listmonitors` 참고")
+    parser.add_argument("--lidar-config", default=None, metavar="JSON",
+                        help="라이다 장착 설정 파일 (기본: 08_Video_Demo/config/lidar_mount.json). "
+                             "lidar_calibrate.py가 현장에서 실측해 써주는 파일")
+    parser.add_argument("--lidar-port", type=int, default=lidar.VLP16_UDP_PORT,
+                        help="VLP-16 UDP 포트")
+    parser.add_argument("--lidar-mount-offset", type=float, default=None, metavar="DEG",
+                        help="라이다 요(yaw) 오프셋 임시 override(도). 설정 파일 값을 덮어쓴다")
+    parser.add_argument("--lidar-mount-height", type=float, default=None, metavar="M",
+                        help="노면→라이다 원점 높이 임시 override(m). 지면 제거 기준")
+    parser.add_argument("--no-lidar", action="store_true",
+                        help="라이다를 아예 쓰지 않는다(방향만 표시). 라이다 없이 화면만 점검할 때")
     return parser.parse_args()
 
 
@@ -615,13 +758,31 @@ def main():
     open_all_cameras()
 
     global LIDAR_AVAILABLE, _lidar_scanner
-    try:
-        _lidar_scanner = lidar.LidarScanner()
-        _lidar_scanner.start()
-        print("[*] LiDAR 스캐너 시작")
-    except Exception as e:  # noqa: BLE001 — 실물 미검증 연동이라 실패해도 데모 전체를 죽이지 않음
-        print(f"[!] LiDAR 연동 실패({e}) — 8/25 버전과 동일하게 모든 감지를 '주의'로 표시합니다.")
+    if args.no_lidar:
         LIDAR_AVAILABLE = False
+        print("[*] --no-lidar — 거리 매칭 없이 방향만 표시합니다")
+    else:
+        cfg = lidar.load_config(args.lidar_config, quiet=False)
+        if args.lidar_mount_offset is not None:
+            cfg.mount_offset_deg = args.lidar_mount_offset
+        if args.lidar_mount_height is not None:
+            cfg.mount_height_m = args.lidar_mount_height
+        # 장착값이 틀리면 거리가 아니라 방향 배정과 지면 제거가 먼저 깨진다. 실측 전이면
+        # 조용히 기본값으로 돌지 않고 매번 경고한다 — 화면의 숫자를 믿을 수 없는 상태이므로.
+        if cfg.mount_offset_deg == 0.0 and cfg.mount_height_m == lidar.MOUNT_HEIGHT_M:
+            print("[!] 라이다 장착값이 아직 기본 추정치입니다(오프셋 0°, 높이 "
+                  f"{lidar.MOUNT_HEIGHT_M}m). 차량에서 다음을 먼저 실행하세요:\n"
+                  "    python3 lidar_calibrate.py --height --bearing --expect 0 --write")
+        print(f"[*] 라이다 장착값: 오프셋 {cfg.mount_offset_deg:+.2f}° · "
+              f"높이 {cfg.mount_height_m:.2f}m · 각도 창 "
+              f"±{cfg.angle_margin_min_deg:.0f}~{cfg.angle_margin_max_deg:.0f}°(sigma x {cfg.sigma_k:g})")
+        try:
+            _lidar_scanner = lidar.LidarScanner(port=args.lidar_port)
+            _lidar_scanner.start()
+            print(f"[*] LiDAR 스캐너 시작 (UDP {args.lidar_port})")
+        except Exception as e:  # noqa: BLE001 — 실패해도 데모 전체를 죽이지 않는다
+            print(f"[!] LiDAR 연동 실패({e}) — 거리 없이 방향만 표시합니다.")
+            LIDAR_AVAILABLE = False
 
     receiver = AudioDetectionReceiver(port=args.port, bind_host=args.bind).start()
     print(f"[*] 젯슨 패킷 수신 대기: {args.bind}:{args.port} (UDP)")

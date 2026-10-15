@@ -62,6 +62,33 @@ HORN_REPEAT_COUNT = 2           # 이 횟수 이상 울리면 경고로 승격
 LOUD_NEAR_DB = -26.0
 MOTO_LOUD_DB = LOUD_NEAR_DB  # 이름 호환용 (기존 참조가 있을 수 있어 남겨둔다)
 
+# ---- 접근 판정 (2026-10-15 추가, 라이다 추적 기반) -------------------------------
+# lidar_distance_match.TargetTracker가 스캔을 넘어가며 같은 물체를 추적해 거리 변화율을
+# 낸다(closing_mps, 양수 = 가까워짐). 음량(rms_db)으로 "가까워지는 중"을 추정하던 경로의
+# 물리적 근거 버전이다 — 음량은 차종·배기·바람에 좌우되지만 거리 변화율은 아니다.
+# ⚠️ 자차 속도를 모르므로 이것은 **상대 속도**다. 주행 중에는 정지한 가드레일·주차 차량도
+#    자차 속도만큼 "접근"으로 보인다. 그래서 이 값만으로 경고를 올리는 것은 라이다가 실제로
+#    물체를 잡은(=방향이 맞는) 경우로 한정하고, 화면 문구도 "접근"까지만 말한다.
+APPROACH_MPS = 2.0          # 이보다 빠르게 거리가 줄면 "접근 중"
+APPROACH_TTC_SEC = 4.0      # 이 안에 도달할 속도로 접근 중이면 단계를 올린다
+
+
+def closing_of(match) -> float:
+    """매칭/추적 결과에서 접근 속도를 꺼낸다. 없으면 0 (= 모른다)."""
+    if not match:
+        return 0.0
+    return float(match.get("closing_mps") or 0.0)
+
+
+def is_approaching(match) -> bool:
+    """라이다 추적 기준으로 접근 중인가. TTC가 짧으면 속도 임계값 아래여도 인정한다."""
+    if not match:
+        return False
+    ttc = match.get("ttc_s")
+    if ttc is not None and 0 < ttc <= APPROACH_TTC_SEC:
+        return True
+    return closing_of(match) >= APPROACH_MPS
+
 
 def _angle_close(a: float, b: float, margin_deg: float) -> bool:
     return abs((a - b + 180.0) % 360.0 - 180.0) <= margin_deg
@@ -138,6 +165,11 @@ class AlertPolicy:
 
         상태는 셋뿐이다 — 잡았거나(경고·위치 추적), 가까워지거나(경고·근접), 모르거나(주의).
         라이다는 단계를 정하지 않고 잡힌 대상의 **거리 숫자만** 보탠다.
+
+        (2026-10-15) "가까워지나"에 라이다 추적 경로가 생겼다. 전에는 음량 하나로만 판단했는데,
+        라이다가 그 방향의 물체를 실제로 추적하고 있으면 거리 변화율이라는 더 직접적인 근거가
+        있다. 음량 경로는 그대로 남는다 — 사각지대·벽 뒤는 라이다가 못 보는 구간이고,
+        그게 이 프로젝트의 차별점이다.
         """
         if detected:
             # 카메라로 확인됐으면 실체가 있는 것 — 경고까지 올리고 위치를 추적해 보여준다.
@@ -149,6 +181,9 @@ class AlertPolicy:
         if match is not None and match["blind"]:
             # 눈으로는 못 봤지만 라이다가 6m 이내에서 뭔가 잡았다 — 가장 위험한 구간이다
             return "경고", None, True, "사각지대"
+        if is_approaching(match):
+            # 안 보이지만 라이다가 그 방향의 물체를 추적 중이고 거리가 줄고 있다
+            return "경고", match["distance_m"], False, "접근 중"
         if AlertPolicy.is_near(rms_db):
             # 안 보이는데 소리가 커지고 있다 = 사각지대에서 접근 중.
             # 이 프로젝트의 차별점이 성립하는 경로다.
@@ -237,6 +272,19 @@ def run_selftest():
     check("Detection 성공 + 라이다 거리 → 거리까지 표시",
           m({"distance_m": 18.0, "blind": False}, True, -45.0),
           ("경고", 18.0, False, "위치 추적"))
+
+    check("접근 중(라이다 추적) → 경고",
+          m({"distance_m": 14.0, "blind": False, "closing_mps": 6.0}, False, -45.0),
+          ("경고", 14.0, False, "접근 중"))
+    check("멀어지는 중이면 단계 안 올림",
+          m({"distance_m": 14.0, "blind": False, "closing_mps": -6.0}, False, -45.0),
+          ("주의", None, False, "사각지대 위험"))
+    check("TTC가 짧으면 느린 접근도 경고",
+          m({"distance_m": 5.0, "blind": False, "closing_mps": 1.4, "ttc_s": 3.6}, False, -45.0),
+          ("경고", 5.0, False, "접근 중"))
+    check("Detection 성공이 접근보다 우선(위치 추적)",
+          m({"distance_m": 14.0, "blind": False, "closing_mps": 6.0}, True, -45.0),
+          ("경고", 14.0, False, "위치 추적"))
 
     check("라이다에 잡혀도 Detection 실패면 단계는 안 올라감",
           m({"distance_m": 12.0, "blind": False}, False, -45.0),

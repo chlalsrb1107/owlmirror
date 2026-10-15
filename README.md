@@ -30,12 +30,19 @@
 | 젯슨 전송 주기 | **1.024초** — CUDA 적용 후 추론이 수음 시간 안에 끝난다 (CPU 때 1.220초) |
 | 화면 렌더 | 6~8 ms/프레임 (1920×1080) |
 
-**미해결 (2026-09-02 기준)**
+**2026-10-15 — 차량 실장착 완료(업체 시공).** 루프랙 구성물(카메라 4대 + VLP-16)이 차에 고정됐다.
+이에 맞춰 "소리 방향 → 라이다로 거리 확정" 경로를 개편했다 — σ 기반 각도 창, 거리+방위 2단
+클러스터링, 방향 일치를 가장 무겁게 보는 후보 선택, 스캔 간 추적(거리 안정화·접근 속도),
+표시 루프의 매 프레임 거리 갱신, 장착값 설정 파일화. ⚠️ **실차 데이터로는 아직 미검증**이다.
+현장 절차: [`01_Hardware/차량장착_라이다_캘리브레이션_절차.md`](01_Hardware/차량장착_라이다_캘리브레이션_절차.md)
+
+**미해결**
 
 - **오토바이 검출률 13%** — 음량은 충분했다(최고 −8.7 dB). 레벨이 아니라 모델이 이 배기음을 분류하지 못한다
 - **`score`/`margin`을 신뢰도로 쓸 수 없다** — sklearn SVC 다중클래스 OvR 값이 "이긴 1:1 대결 수(0~4)+소수점" 구조라, 확신 있는 예측이면 클래스와 무관하게 늘 4.2가 나온다. 오경보 차단은 음량(`--min-db`)으로 우회 중
-- **`MOUNT_OFFSET_DEG` 미실측** — σ 5~7°는 **정밀도**이고 정확도는 아직 모른다. 차량 장착 후 각도를 아는 위치에서 재야 한다
-- **차량 미장착** — 카메라 시리얼→방향 배정이 캘리브레이션 ID로 유도한 값이라 물리 검증 필요
+- **`MOUNT_OFFSET_DEG` 미실측** — σ 5~7°는 **정밀도**이고 정확도는 아직 모른다. 측정 도구(`lidar_calibrate.py`)는 준비됐고, 차량에서 실행만 하면 된다
+- **카메라 방향 배정 미검증** — 카메라 시리얼→방향이 캘리브레이션 ID로 유도한 값이라, 각 방향에서 손을 흔들어 물리 검증 필요
+- **접근 속도는 상대 속도** — 자차 속도를 안 쓰므로 주행 중에는 정지 구조물도 접근으로 보인다. 정차 상태에서 먼저 검증할 것
 
 ---
 
@@ -113,6 +120,21 @@ LiDAR를 쓰는 사이렌·오토바이는 6m 이내 관측도 사각지대로 �
 
 ## 실행
 
+### 차량에 올린 직후 (장착값 실측 — 이걸 먼저)
+
+```bash
+cd 08_Video_Demo/code
+python3 lidar_calibrate.py --sectors                          # 패킷·방향 감각 확인
+python3 lidar_calibrate.py --height                           # 노면 리턴으로 장착 높이 역산
+python3 lidar_calibrate.py --bearing --expect 0               # 정면 10m 표적으로 요 오프셋
+python3 lidar_calibrate.py --height --bearing --expect 0 --write   # config/lidar_mount.json에 저장
+python3 lidar_calibrate.py --audio-offset --samples 20        # 라이다 기준으로 마이크 오프셋 역산
+```
+
+**이 두 값을 실측하기 전까지 화면의 거리는 믿을 수 없다** — 높이가 틀리면 노면이 "6~8m 앞
+물체"로 남고, 요 오프셋이 틀리면 엉뚱한 방향 물체의 거리가 소리 방향에 붙는다.
+단계별 주의사항·합격 기준: [`01_Hardware/차량장착_라이다_캘리브레이션_절차.md`](01_Hardware/차량장착_라이다_캘리브레이션_절차.md)
+
 ### 노트북
 
 ```bash
@@ -128,6 +150,10 @@ python3 08_Video_Demo/code/live_demo.py --snapshot ./out --frames 20
 
 `--monitor`를 주면 그 모니터 **해상도 그대로 렌더링**한다. 다른 해상도의 차량 디스플레이도 대응된다.
 
+라이다 장착값은 `08_Video_Demo/config/lidar_mount.json`에서 읽는다. 급히 바꿔 볼 때는
+`--lidar-mount-offset`/`--lidar-mount-height`로 덮어쓰고, 라이다 없이 화면만 볼 때는
+`--no-lidar`를 준다.
+
 ### 젯슨
 
 ```bash
@@ -142,12 +168,19 @@ python3 -u jetson_audio_sender.py --host 192.168.10.1 \
 ### 하드웨어 없이 확인
 
 ```bash
-python3 08_Video_Demo/code/bev_render.py    --selftest --outdir /tmp/bev   # 화면 10종 PNG
+python3 08_Video_Demo/code/pipeline_selftest.py                            # ★ 파이프라인 전체 (약 15초)
+python3 08_Video_Demo/code/bev_render.py    --selftest --outdir /tmp/bev   # 화면 12종 PNG
 python3 08_Video_Demo/code/alert_policy.py  --selftest                     # 알림 규칙
-python3 08_Video_Demo/code/lidar_distance_match.py --selftest              # 거리 매칭
+python3 08_Video_Demo/code/lidar_distance_match.py --selftest              # 거리 매칭·추적
+python3 08_Video_Demo/code/lidar_calibrate.py      --selftest              # 캘리브레이션 추정
 python3 08_Video_Demo/code/doa_camera_select.py    --selftest              # 방향→카메라
 python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
 ```
+
+`pipeline_selftest.py`는 가짜 센서(합성 노면 + 다가오는 차량, 가짜 젯슨 패킷)를 꽂고
+**`live_demo.py`의 실제 함수들**을 그대로 돌린다. 모듈별 셀프테스트가 다 통과해도 **연결**이
+틀리면 화면은 조용히 거짓말을 하기 때문에(σ를 안 넘겨 창이 항상 열려 있거나, 거리 갱신이
+표시 루프에 안 걸려 있거나), 그 연결 자체를 검증하는 것이 이 파일의 역할이다.
 
 ---
 
@@ -172,6 +205,7 @@ python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
 └── 08_Video_Demo/                ← 실제 동작하는 구현이 전부 여기 있다
     ├── camera_ui_mockup.html     UI 기준 디자인 (시나리오 10종, 인터랙티브)
     ├── calibration/cam1~4_calib/ 카메라 내부 파라미터
+    ├── config/lidar_mount.json   라이다 장착값·매칭 파라미터 (캘리브레이션 도구가 기록)
     ├── model_outputs/            YOLO 구급차·오토바이 검출 모델 (가중치는 gitignore)
     └── code/
         ├── jetson_audio_sender.py   [젯슨] 수음→분류→DoA→UDP 송신
@@ -179,8 +213,11 @@ python3 08_Video_Demo/code/jetson_audio_sender.py  --host 127.0.0.1 --simulate
         ├── alert_policy.py          클래스별 알림 규칙 (주의/경고 판정)
         ├── bev_render.py            화면 합성 — BEV|카메라 반반, 주간/야간 팔레트
         ├── live_demo.py             오케스트레이터 (카메라·LiDAR·수신·화면)
-        ├── lidar_distance_match.py  VLP-16 수신, 지면 제거, 거리 클러스터링
+        ├── lidar_distance_match.py  VLP-16 수신 → 소리 방향 조회 → 거리 확정·추적
+        ├── lidar_calibrate.py       [현장] 장착 높이·요 오프셋 실측, 마이크 오프셋 역산
+        ├── pipeline_selftest.py     가짜 센서로 파이프라인 전체 검증 (하드웨어 불필요)
         ├── doa_camera_select.py     펌웨어 DoA 읽기 + 방향→카메라 매핑
+        ├── monitor_rx.py            현장용 수신 모니터
         └── preflight_view.py        카메라 4대+LiDAR 사전 점검 뷰어
 ```
 

@@ -1,0 +1,43 @@
+{
+  "_note": "LiDAR 장착값·매칭 파라미터. lidar_calibrate.py --write가 덮어쓴다. 장착을 다시 하면 재측정할 것.",
+  "_status": "2026-10-15 — mount_offset_deg / mount_height_m 는 아직 실측 전 기본 추정치다. 차량에서 lidar_calibrate.py로 측정해 교체할 것.",
+  "_measure": "python3 08_Video_Demo/code/lidar_calibrate.py --height --bearing --expect 0 --write",
+  "mount_offset_deg": 0.0,
+  "mount_height_m": 1.7,
+
+  "_ground": "지면·천장 제거 — 노면(z=-mount_height) 위 min~센서 위 max 구간만 물체로 본다",
+  "min_object_height_m": 0.3,
+  "max_object_height_m": 1.5,
+
+  "_range": "유효 거리. blind_radius 안은 거리 대신 '사각지대'로 보고한다(VLP-16 물리 사각)",
+  "blind_radius_m": 6.0,
+  "range_max_m": 60.0,
+  "range_min_m": 0.5,
+
+  "_window": "각도 창 반폭 = clamp(sigma_k x 젯슨 sigma, min, max). 방향이 또렷하면 좁아진다",
+  "sigma_k": 2.0,
+  "angle_margin_min_deg": 8.0,
+  "angle_margin_max_deg": 30.0,
+
+  "_cluster": "거리축·방위축 2단 분리. 멀수록 점이 줄어드니 min_cluster_points는 실차에서 재조정",
+  "cluster_gap_m": 1.0,
+  "cluster_azimuth_gap_deg": 2.5,
+  "min_cluster_points": 5,
+
+  "_score": "후보 선택 가중치(낮을수록 좋음). 방향 일치를 가장 무겁게 본다",
+  "w_bearing": 1.0,
+  "w_distance": 0.45,
+  "w_spread": 0.35,
+  "w_points": 0.25,
+  "wall_range_span_m": 8.0,
+
+  "_track": "스캔 간 추적 — 거리 안정화·접근 속도·놓친 스캔 coast",
+  "track_confirm_hits": 2,
+  "track_coast_sec": 0.6,
+  "track_drop_sec": 2.0,
+  "track_gate_m": 4.0,
+  "track_ema_alpha": 0.45,
+  "closing_window_sec": 2.0,
+  "closing_min_span_sec": 0.5,
+  "closing_min_samples": 4
+}
