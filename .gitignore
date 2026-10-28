@@ -25,3 +25,7 @@ Screencasts/
 # bev_render.py --selftest 기본 출력 폴더 (언제든 재생성되는 산출물)
 # 문서에 쓸 렌더는 06_Display_Integration/ui_screens/render_day·render_night 에 있다.
 08_Video_Demo/code/bev_selftest/
+
+# 로컬 개발 도구 설정 (저장소 공유 대상 아님)
+CLAUDE.md
+.claude/
