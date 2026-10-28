@@ -91,16 +91,16 @@ ReSpeaker 마이크                              VLP-16 LiDAR
 - `code/bev_render.py` — **(2026-09-02 신규)** 화면 합성 전담(1600x900, BEV 좌 | 카메라 우). LiDAR 리턴을 그대로 점으로 그리고, 확정 대상은 색 클러스터·미확정은 부채꼴·6m 이내는 사각 구역 점등으로 구분한다. `--selftest`로 하드웨어 없이 시나리오 8종 PNG를 뽑아 레이아웃을 확인할 수 있다. ⚠️ 목업 SVG는 시계+ 각도, 시스템 `theta`는 반시계+ 라 `_screen_angle()`에서 뒤집어 맞춘다 — 목업 코드를 옮길 때 이걸 빠뜨리면 BEV가 좌우 반전된다.
 - `code/live_demo.py` — 실제 라이브 데모 앱. 전/좌/우/후방 카메라 4대를 시작할 때 전부 미리 열어두고(전환 지연 없음), 오디오 분류+DoA는 백그라운드 스레드, LiDAR는 자체 배경 스레드(`LidarScanner`), 카메라 표시는 메인 스레드(OpenCV 창)로 분리해서 소리 감지 시 방향에 맞는 카메라+배너(+사이렌/오토바이는 Detection 박스, +LiDAR 거리 매칭 성공 시 "경고" 빨강 테두리)로 3초간 전환했다가 후방으로 자동 복귀한다(`ui_state_spec.md`의 "3초 유지" 원칙). LiDAR 연동이 시작 시 실패하면 `LIDAR_AVAILABLE=False`로 자동 폴백해 모든 감지를 8/25 버전과 동일하게 "주의"로만 표시한다. 레이아웃은 `camera_ui_mockup.html`을 따름. **카메라 4대는 일반 UVC 웹캠이 아니라 Daheng Imaging MER2-240-159U3C(USB3 Vision 산업용 카메라)**라 `cv2.VideoCapture`가 아니라 Daheng 공식 SDK `gxipy`로 프레임을 읽는다. **실제 시리얼번호는 자리표시값**(아래 참고). 한글 텍스트는 `cv2.putText`가 못 그려서 Pillow+한글 폰트로 그림 — `FONT_PATH`가 실제 노트북 폰트 경로를 가리키는지 확인 필요(우분투는 `sudo apt install fonts-nanum`).
 - `model_outputs/yolo26m_v4_cls05/` — 팀원이 학습한 구급차(Ambulance)/오토바이(Motorcycle) YOLO 모델(2026-08-25 저장소 루트에 업로드된 것 정리). 가중치(`.pt`)는 gitignore 처리, 상세는 그 폴더의 README 참고.
-- `calibration/cam1_calib`~`cam4_calib/` — 카메라 4대 각각의 내부 파라미터(camera_matrix, distortion_coefficients) 캘리브레이션 결과(2026-08-25 저장소 루트에 업로드된 것 정리). **방향 매핑 확정: cam1=좌, cam2=우, cam3=후방, cam4=전방** (`live_demo.py`의 `CAMERA_CALIB_ID`) — 설치 시 각 방향에 해당 번호로 캘리브레이션된 물리 카메라를 붙이면 됨.
+- `calibration/cam1_calib`~`cam4_calib/` — 카메라 4대 각각의 내부 파라미터(camera_matrix, distortion_coefficients) 캘리브레이션 결과(2026-08-25 저장소 루트에 업로드된 것 정리). **방향 매핑 (2026-10-16 실물 검증·교정): cam1=좌, cam2=전방, cam3=후방, cam4=우측** (`camera_bearing.py`의 `CAMERA_CALIB_ID`). 9월까지 적혀 있던 cam2=우/cam4=전방은 **유도값이었고 실제와 달랐다** — 손 흔들기 검증에서 전방↔우측이 바뀐 것을 확인해 고쳤다. 상세·시리얼번호는 `01_Hardware/HW_구성도_개발보고서용.md` §6.
 
 ## 아직 안 된 것 (팀 확인 필요, 촬영 전 최우선순위 순)
 
-- [ ] **`code/lidar_distance_match.py` 전체가 미검증** — VLP-16 UDP 포트/패킷 포맷, 좌표계→차량 정면 오프셋(`MOUNT_OFFSET_DEG`), 최소 포인트 수·노이즈 필터링 전부 실물 없이 작성함. 실물 장비로 `--live --theta <deg>`부터 확인
-- [ ] `code/live_demo.py`의 4번째 카메라(전방) 연동 확인 — 기존 좌/우/후방 3대는 이미 마운트·캘리브레이션 완료, 전방(cam4)만 신규로 물리 장착·시리얼번호 확인 필요
+- [ ] **`code/lidar_distance_match.py`의 장착값이 실차 미실측** — UDP 수신·패킷 포맷·매칭 로직은 2026-09-02 실물 VLP-16으로 확인했고 셀프테스트도 ALL PASS지만, **요 오프셋(`mount_offset_deg`)과 높이(`mount_height_m`)는 아직 주행 차량에서 재지 않았다**(실내 책상 1.105m만 실측). 차량에서 `lidar_calibrate.py --height --bearing --expect 0 --write` 먼저 실행할 것
+- [x] ~~`code/live_demo.py`의 4번째 카메라(전방) 연동 확인~~ → **완료.** 2026-09-01 4대 동시 동작 확인(124 fps), 2026-10-16 방향 배정까지 실물 검증
 - [ ] `DOAANGLE` 레지스터 id(=21)가 실제 이 보드에서 맞는지 `--live`로 검증 (ReSpeaker 공식 참고값이나 실측 안 됨)
 - [ ] `MOUNT_OFFSET_DEG` — 차량에 마이크 장착 후 정면(0°) 기준 보정 (라이다용 오프셋은 별도 값, `lidar_distance_match.py`의 동명 상수 참고)
 - [x] ~~카메라 3대 임시 마운트 방법~~ → 좌/우/후방 구매·규격·마운트·캘리브레이션 완료 (2026-08-25)
-- [ ] `live_demo.py`의 `CAMERA_SERIAL`(시리얼번호, 현재 빈 값) — 설치 시 `CAMERA_CALIB_ID`에 맞는 물리 카메라(예: left=cam1 캘리브레이션 개체)의 실제 시리얼번호로 채울 것
+- [x] ~~`live_demo.py`의 `CAMERA_SERIAL`(시리얼번호, 현재 빈 값)~~ → **완료.** 2026-09-01 시리얼 4개 확보, 2026-10-16 손 흔들기로 방향 배정 검증·교정
 - [ ] `gxipy`(Daheng Galaxy SDK), `velodyne-decoder` 설치 및 카메라·라이다 인식 확인 — 노트북(우분투)에 벤더 드라이버 설치 필요할 수 있음
 - [ ] 한글 폰트 설치 확인(`fonts-nanum` 등) 및 `live_demo.py`의 `FONT_PATH`를 실제 경로로 수정
 - [ ] `yolo26m_v4_cls05`의 베이스 모델(`yolo26m.pt`)이 표준 `ultralytics` 배포판에 있는 이름인지 확인 — 없으면 학습 팀원의 패키지 버전 확인 필요

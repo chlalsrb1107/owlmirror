@@ -16,3 +16,12 @@ Log/
 
 # Obsidian 에디터 로컬 워크스페이스 상태 (기기별 창 배치 등, 공유 대상 아님)
 .obsidian/
+
+# 화면 녹화 원본 (총 161MB, 개별 82MB — GitHub 100MB 제한에 걸리고 저장소를 영구히 불린다)
+# 편집본은 한이음 포털에 제출하고, 문서에 쓸 프레임만 잘라
+# 06_Display_Integration/ui_screens/ 에 PNG로 넣는다.
+Screencasts/
+
+# bev_render.py --selftest 기본 출력 폴더 (언제든 재생성되는 산출물)
+# 문서에 쓸 렌더는 06_Display_Integration/ui_screens/render_day·render_night 에 있다.
+08_Video_Demo/code/bev_selftest/
