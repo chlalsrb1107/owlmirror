@@ -32,7 +32,8 @@ _VENDOR = Path(os.path.expanduser("~/Documents/daheng_ws_1/vendor"))
 if _VENDOR.is_dir():
     sys.path.insert(0, str(_VENDOR))
 
-from live_demo import CAMERA_SERIAL, configure_exposure  # noqa: E402  (설정을 live_demo와 공유)
+from live_demo import (CAMERA_SERIAL, configure_exposure,  # noqa: E402  (설정을 live_demo와 공유)
+                       set_exposure_limits)
 
 CELL_W, CELL_H = 512, 300      # 카메라 한 칸 크기
 BEV_SIZE = 600                 # BEV 패널 한 변
@@ -173,7 +174,13 @@ def main():
     ap.add_argument("--snapshot", metavar="PNG", help="1장만 저장하고 종료 (창 없이)")
     ap.add_argument("--no-lidar", action="store_true")
     ap.add_argument("--warmup", type=float, default=1.5, help="자동노출/첫 스캔 안정화 대기(초)")
+    ap.add_argument("--max-exposure", type=float, default=None, metavar="MS",
+                    help="자동노출 상한(ms). 기본 8ms는 주행 기준이라 실내에서는 어둡다. "
+                         "실내 점검 때만 30~50으로 올릴 것")
     args = ap.parse_args()
+
+    if args.max_exposure is not None:
+        set_exposure_limits(max_exposure_us=args.max_exposure * 1000.0)
 
     import cv2
 

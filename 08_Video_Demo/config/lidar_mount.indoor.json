@@ -1,0 +1,48 @@
+{
+  "_note": "실내 기능 촬영용 설정 (2026-10-16). 주행용 기본값(lidar_mount.json)은 건드리지 않는다.",
+  "_why": "사각지대 반경은 고정 상수가 아니라 장착 높이에서 나오는 기하다. VLP-16 최하단 빔은 -15°이고 노면에 닿는 거리는 h/tan(15°) — 루프랙 1.7m면 6.3m지만, 실내 책상 1.10m면 4.1m다. 6m를 그대로 쓰면 방 전체가 사각지대로 떨어져 거리 숫자가 하나도 안 뜬다.",
+  "_measured": "mount_height_m 1.105 m — 2026-10-16 실측(lidar_calibrate.py --height, 10스캔 편차 0.1cm, 세 밴드 모두 일치)",
+  "_usage": "python3 live_demo.py --lidar-config 08_Video_Demo/config/lidar_mount.indoor.json --bev-range 12 --max-exposure 40",
+
+  "mount_offset_deg": 0.0,
+  "mount_height_m": 1.105,
+
+  "_ground_indoor": "책상 위라 바닥까지 0.9m뿐이다. 물체 하한을 낮춰야 가까운 대상이 안 잘린다",
+  "min_object_height_m": 0.15,
+  "max_object_height_m": 1.2,
+
+  "_range_indoor": "실내 치수에 맞춘 유효 거리. 사각지대는 1.0m(센서 바로 앞 자기 반사만 배제)",
+  "blind_radius_m": 1.0,
+  "range_max_m": 15.0,
+  "range_min_m": 0.3,
+
+  "sigma_k": 2.0,
+  "angle_margin_min_deg": 8.0,
+  "angle_margin_max_deg": 30.0,
+
+  "_cluster_indoor": "가까우면 같은 물체에 점이 훨씬 많이 맺힌다. 거리축 간격을 좁혀 벽과 대상을 가른다",
+  "cluster_gap_m": 0.4,
+  "cluster_azimuth_gap_deg": 2.5,
+  "min_cluster_points": 8,
+
+  "_size_indoor": "라이다 0.53m 앞 책상 다리(폭 7cm)가 계속 최근접으로 잡혀 사각지대로 떨어졌다. 모니터는 폭 54cm라 0.25m 기준이면 책상 다리만 걸러진다 (2026-10-16 실측)",
+  "min_object_width_m": 0.25,
+  "width_filter_max_range_m": 20.0,
+
+  "w_bearing": 1.0,
+  "w_distance": 0.45,
+  "w_spread": 0.35,
+  "w_points": 0.25,
+  "wall_range_span_m": 3.0,
+
+  "_track_indoor": "촬영 중 숫자가 깜빡이지 않게 유지 시간을 늘렸다. 사람이 사진을 들고 서 있으면 자세가 조금 흔들려 한두 스캔 놓치는데, 기본 0.6초로는 그때 '거리 확인 중'이 잠깐 뜬다. 1.5초면 다음 스캔이 이어받는다",
+  "track_confirm_hits": 2,
+  "track_coast_sec": 1.5,
+  "track_drop_sec": 3.0,
+  "track_gate_m": 1.5,
+  "track_ema_alpha": 0.45,
+  "closing_window_sec": 2.0,
+  "closing_min_span_sec": 0.5,
+  "closing_min_samples": 4,
+  "lag_compensation_max_m": 1.0
+}

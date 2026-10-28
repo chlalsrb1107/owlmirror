@@ -85,6 +85,31 @@ def _px(n):
     return int(round(n * TEXT_SCALE))
 RANGE_MAX_M = 40.0               # 지도 바깥 테두리까지의 거리
 RING_M = (10.0, 20.0, 40.0)
+
+
+def configure_range(range_max_m: float, blind_m: float = None, rings=None):
+    """BEV 지도의 거리 범위를 바꾼다 (2026-10-16 실내 촬영 대응).
+
+    기본 40m는 주행용이다. 실내에서는 벽이 2~5m에 있어 모든 점이 중심에 뭉쳐 지도가
+    읽히지 않는다 — 영상에서 "거리를 보여준다"는 말이 성립하지 않는다.
+
+    blind_m도 함께 받는다. 사각지대 반경은 고정 상수가 아니라 **장착 높이에서 나오는
+    기하**다 — VLP-16 최하단 빔이 -15°이므로 노면에 닿는 거리는 h/tan(15°)이고,
+    1.7m 루프랙이면 6.3m지만 1.1m 책상이면 4.1m다. 실내 데모에서 6m를 그대로 쓰면
+    방 전체가 사각지대가 된다.
+    """
+    global RANGE_MAX_M, BLIND_M, RING_M, _background_cache
+    RANGE_MAX_M = float(range_max_m)
+    if blind_m is not None:
+        BLIND_M = float(blind_m)
+    if rings is not None:
+        RING_M = tuple(float(r) for r in rings)
+    else:
+        RING_M = (round(RANGE_MAX_M / 4, 1), round(RANGE_MAX_M / 2, 1), RANGE_MAX_M)
+    _background_cache = None       # 링 위치가 바뀌었으니 배경 캐시는 못 쓴다
+    print(f"[*] BEV 범위 {RANGE_MAX_M:.0f}m · 링 {'/'.join(f'{r:g}' for r in RING_M)}m "
+          f"· 사각지대 {BLIND_M:.1f}m")
+    return RANGE_MAX_M
 BLIND_M = lidar.BLIND_RADIUS_M   # 6.0 — 물리적 사각지대
 
 # ---- 색 (BGR) ------------------------------------------------------------------

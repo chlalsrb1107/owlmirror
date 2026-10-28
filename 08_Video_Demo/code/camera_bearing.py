@@ -45,9 +45,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION_DIR = REPO_ROOT / "08_Video_Demo" / "calibration"
 CONFIG_PATH = REPO_ROOT / "08_Video_Demo" / "config" / "camera_mount.json"
 
-# 방향별 담당 캠 번호 — 설치 시 이 번호로 캘리브레이션된 물리 카메라를 해당 방향에 붙인다.
+# 방향별 담당 캠 번호 — 그 방향에 실제로 붙어 있는 물리 카메라의 캘리브레이션 번호다.
 # (live_demo.CAMERA_CALIB_ID가 여기를 import해 쓴다. 두 군데 두면 반드시 어긋난다)
-CAMERA_CALIB_ID = {"front": 4, "left": 1, "right": 2, "rear": 3}
+# ⚠️ (2026-10-16) 실물 확인에서 정면↔우측이 바뀌어 있어 교정했다. 내부 파라미터(fx, cx)는
+#    방향이 아니라 **물리 카메라**를 따라가므로, live_demo.CAMERA_SERIAL과 항상 같이 바꿀 것.
+#    한쪽만 고치면 박스→방위 환산이 다른 렌즈의 fx를 쓰게 되어 방위가 조용히 틀어진다.
+CAMERA_CALIB_ID = {"front": 2, "left": 1, "right": 4, "rear": 3}
 
 # 카메라가 바라보는 방향 (차량 좌표계, 전방 0°, 반시계 +)
 CAMERA_YAW_DEG = {"front": 0.0, "left": 90.0, "rear": 180.0, "right": -90.0}

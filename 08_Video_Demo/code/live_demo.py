@@ -116,18 +116,23 @@ POLL_INTERVAL = 0.05
 DETECTOR_WEIGHTS = REPO_ROOT / "08_Video_Demo" / "model_outputs" / "yolo26m_v4_cls05" / "weights" / "best.pt"
 
 # (2026-09-01) 실장비 4대 열거로 시리얼 확보 — 전부 MER2-240-159U3C, 2048x1200 BayerGB8.
-# 아래 방향 배정은 CAMERA_CALIB_ID(front=cam4/left=cam1/right=cam2/rear=cam3)와
-# daheng_ws_1/sync_cam.py의 CAM1~CAM4 순서를 결합해 **유도**한 값이다.
-# ⚠️ 아직 차량에 장착하지 않았으므로 물리적으로 검증된 배정이 아니다. 루프랙에 올린 뒤
-#    각 방향에서 손을 흔들어 화면이 맞게 뜨는지 반드시 확인하고, 어긋나면 여기를 고칠 것.
+# (2026-10-16) **실물로 검증했다.** 각 방향에서 손을 흔들어 확인한 결과 정면과 우측이 서로
+# 바뀌어 있었다(유도값이 틀렸다). 아래가 실측으로 교정된 배정이다.
+#   FHH26070137 = CAM4 → **우측**   (이전에 정면으로 잘못 배정)
+#   FHH26070138 = CAM1 → 좌측
+#   FHH26070139 = CAM2 → **정면**   (이전에 우측으로 잘못 배정)
+#   FHH26070140 = CAM3 → 후방
+# ⚠️ 캘리브레이션 ID(camera_bearing.CAMERA_CALIB_ID)도 **함께** 바꿔야 한다 — 내부 파라미터는
+#    방향이 아니라 물리 카메라를 따라간다. 한쪽만 고치면 박스→방위 환산이 다른 렌즈의 fx를 쓴다.
 #    (배선 순서와 소프트웨어 순서가 어긋나도 코드는 절대 알아채지 못한다 — sync_cam.py 주석 참고)
 CAMERA_SERIAL = {
-    "front": "FHH26070137",  # = CAM4
+    "front": "FHH26070139",  # = CAM2 (2026-10-16 교정)
     "left":  "FHH26070138",  # = CAM1
-    "right": "FHH26070139",  # = CAM2
+    "right": "FHH26070137",  # = CAM4 (2026-10-16 교정)
     "rear":  "FHH26070140",  # = CAM3 (기본 표시 카메라)
 }
-CAMERA_INDEX_FALLBACK = {"front": 4, "left": 1, "right": 2, "rear": 3}  # gxipy는 index가 1부터 시작
+# gxipy는 index가 1부터 시작. 시리얼을 못 읽을 때의 폴백이라 물리 카메라 번호를 그대로 쓴다.
+CAMERA_INDEX_FALLBACK = {"front": 2, "left": 1, "right": 4, "rear": 3}
 _camera_handles = {}
 # ⚠️ DeviceManager를 살려둬야 한다. gxipy는 DeviceManager 인스턴스 수를 세다가 0이 되면
 #    __del__에서 gx_close_lib()를 호출하고, 그 순간 이미 열려 있던 카메라 핸들이 전부
@@ -196,6 +201,29 @@ def get_device_manager():
         _device_manager = gx.DeviceManager()
         _device_manager.update_device_list()
     return _device_manager
+
+
+def set_exposure_limits(max_exposure_us: float = None, max_gain_db: float = None):
+    """노출·게인 상한을 런타임에 바꾼다 (정지 상태 실내 점검용).
+
+    기본 8ms는 **주행 중 모션블러** 기준으로 건 값이다(50km/h에서 8ms=11cm, 223ms=3.1m).
+    그런데 정지 상태 실내에서는 같은 상한 때문에 화면이 심하게 어두워져(2026-10-16 실내
+    점검에서 mean 3~41) YOLO 검증조차 어렵다. 현장에서 코드를 고치지 않고 올릴 수 있도록
+    플래그로 뺀다.
+
+    ⚠️ 올린 채로 주행하면 안 된다. 노출이 길어지는 만큼 프레임이 뭉개지고 fps도 떨어진다.
+    """
+    global MAX_EXPOSURE_US, MAX_GAIN_DB
+    if max_exposure_us is not None:
+        MAX_EXPOSURE_US = float(max_exposure_us)
+    if max_gain_db is not None:
+        MAX_GAIN_DB = float(max_gain_db)
+    note = ""
+    if MAX_EXPOSURE_US > 16000.0:
+        note = ("  ⚠️ 주행 중에는 쓰지 말 것 — 50km/h에서 "
+                f"{MAX_EXPOSURE_US / 1000 * 13.9 / 100:.2f}m가 뭉개진다")
+    print(f"[*] 노출 상한 {MAX_EXPOSURE_US / 1000:.1f}ms · 게인 상한 {MAX_GAIN_DB:.0f}dB{note}")
+    return MAX_EXPOSURE_US, MAX_GAIN_DB
 
 
 def configure_exposure(cam, gx):
@@ -816,6 +844,16 @@ def parse_args():
                         help="노면→라이다 원점 높이 임시 override(m). 지면 제거 기준")
     parser.add_argument("--no-lidar", action="store_true",
                         help="라이다를 아예 쓰지 않는다(방향만 표시). 라이다 없이 화면만 점검할 때")
+    parser.add_argument("--hold", type=float, default=None, metavar="SEC",
+                        help="감지 유지 시간(초). 기본 3초(경적 4초). 오토바이 배기음은 모델이 "
+                             "중간중간 놓쳐(실측 14%%) 3초로는 배너가 8~15초씩 끊긴다 — 같은 음원이 "
+                             "계속 울리는 상황을 연속으로 보여주려면 12~15로 올릴 것")
+    parser.add_argument("--bev-range", type=float, default=None, metavar="M",
+                        help="BEV 지도 최대 거리(m). 기본 40m는 주행용 — 실내 촬영에서는 "
+                             "10~12로 줄여야 지도가 읽힌다. 링 간격은 자동으로 맞춘다")
+    parser.add_argument("--max-exposure", type=float, default=None, metavar="MS",
+                        help="자동노출 상한(ms). 기본 8ms는 주행 중 모션블러 기준이라 정지·실내에서는 "
+                             "어둡다. 실내 점검 때만 30~50으로 올릴 것 — 주행 중에는 올리지 말 것")
     return parser.parse_args()
 
 
@@ -824,6 +862,19 @@ def main():
 
     bev_render.set_theme(args.theme)
     print(f"[*] 화면 팔레트: {args.theme}")
+
+    if args.max_exposure is not None:
+        set_exposure_limits(max_exposure_us=args.max_exposure * 1000.0)
+
+    if args.hold is not None:
+        # ⚠️ 유지 시간을 늘린다고 없던 감지가 생기지는 않는다 — 실제로 잡힌 감지를 더 오래
+        #    보여줄 뿐이다. 주행 중에 길게 잡으면 이미 지나간 대상의 경고가 남으므로
+        #    기본값(3초/경적 4초)을 바꾸지 않고 플래그로만 올린다.
+        global HOLD_SEC, HOLD_SEC_BY_CLASS
+        HOLD_SEC = float(args.hold)
+        HOLD_SEC_BY_CLASS = {k: max(v, HOLD_SEC) for k, v in HOLD_SEC_BY_CLASS.items()}
+        print(f"[*] 감지 유지 시간 {HOLD_SEC:.0f}초 "
+              f"{'⚠️ 주행 중에는 기본값(3초)으로 되돌릴 것' if HOLD_SEC > 6 else ''}")
 
     print("[*] Detection 모델(구급차/오토바이) 로딩 중...")
     detector = load_detector()
@@ -846,6 +897,12 @@ def main():
             print("[!] 라이다 장착값이 아직 기본 추정치입니다(오프셋 0°, 높이 "
                   f"{lidar.MOUNT_HEIGHT_M}m). 차량에서 다음을 먼저 실행하세요:\n"
                   "    python3 lidar_calibrate.py --height --bearing --expect 0 --write")
+        # BEV 지도 범위는 라이다 설정의 사각지대 반경과 맞춰야 한다 — 지도에 그려지는
+        # 사각 원반과 판정에 쓰이는 반경이 어긋나면 화면이 거짓말을 한다.
+        if args.bev_range is not None:
+            bev_render.configure_range(args.bev_range, blind_m=cfg.blind_radius_m)
+        elif cfg.blind_radius_m != lidar.BLIND_RADIUS_M:
+            bev_render.configure_range(bev_render.RANGE_MAX_M, blind_m=cfg.blind_radius_m)
         print(f"[*] 라이다 장착값: 오프셋 {cfg.mount_offset_deg:+.2f}° · "
               f"높이 {cfg.mount_height_m:.2f}m · 각도 창 "
               f"±{cfg.angle_margin_min_deg:.0f}~{cfg.angle_margin_max_deg:.0f}°(sigma x {cfg.sigma_k:g})")
