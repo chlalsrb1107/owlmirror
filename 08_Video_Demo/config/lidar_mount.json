@@ -24,6 +24,10 @@
   "cluster_azimuth_gap_deg": 2.5,
   "min_cluster_points": 5,
 
+  "_width": "최소 물체 폭 필터. 주행에서는 0 = 끈다. 폭을 현(弦) 길이로 추정하므로 가까울수록 같은 폭을 넘기는 데 더 넓은 각폭이 필요해(3m에서 0.2m = 3.8°) 근거리 물체가 통째로 지워진다 — 2026-10-16~29 동안 기본값 0.20이 켜져 있어 사각지대 보고가 깨졌다. 실내 촬영처럼 가는 기둥을 걸러야 할 때만 lidar_mount.indoor.json에서 켠다",
+  "min_object_width_m": 0.0,
+  "width_filter_max_range_m": 20.0,
+
   "_score": "후보 선택 가중치(낮을수록 좋음). 방향 일치를 가장 무겁게 본다",
   "w_bearing": 1.0,
   "w_distance": 0.45,

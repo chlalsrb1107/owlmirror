@@ -98,6 +98,24 @@ class LidarConfig:
     cluster_azimuth_gap_deg: float = 2.5   # 방위축에서 이보다 벌어지면 다른 물체
     min_cluster_points: int = MIN_CLUSTER_POINTS
 
+    # --- 최소 물체 크기 (2026-10-16 추가 / 2026-10-29 기본값 OFF) ---
+    # 소리를 내는 대상(차량·오토바이)은 최소한의 폭이 있다. 표지판 기둥·가드레일 지주·
+    # 케이블·삼각대 다리처럼 가는 물체가 창 안에서 더 가깝다는 이유로 선택되면, 정작
+    # 그 소리를 낸 차량 대신 기둥까지의 거리를 보고하게 된다.
+    #
+    # ⚠️ 기본값은 0.0 = **끈다.** 이 값은 실내 촬영용(라이다 1.1m 책상, 0.53m 앞 책상
+    #    다리)으로 뽑은 것이라 주행 기본 설정에 두면 안 된다. 폭을 현(弦) 길이로
+    #    추정하므로 **가까울수록** 같은 0.2m를 넘기는 데 더 넓은 각폭이 필요하고
+    #    (3m에서 3.8° ≈ 방위열 19개), 근거리 물체가 통째로 지워진다.
+    #    실제로 기본값 0.20이 켜져 있던 동안 셀프테스트 "사각지대(3m)"가 깨졌다 —
+    #    3m 물체가 후보에서 사라져 blind가 아니라 None(위치 미확정)으로 보고됐고,
+    #    이는 alert_policy 우선순위 1위인 "오토바이 · 사각지대" 경고가 조용히 안 뜬다는
+    #    뜻이다. 필요한 곳에서만 설정 파일로 켠다 (config/lidar_mount.indoor.json).
+    # ⚠️ 먼 거리에서는 적용하지 않는다 — 50m 차량은 수직 빔이 1~2개만 맞아 폭이
+    #    과소 추정될 수 있어서, 멀리 있는 진짜 차량을 걸러낼 위험이 있다.
+    min_object_width_m: float = 0.0
+    width_filter_max_range_m: float = 20.0
+
     # --- 후보 점수 (낮을수록 좋음) ---
     w_bearing: float = 1.0       # 방향 일치 — 가장 무겁다. 우리가 찾는 건 "그 소리를 낸 것"
     w_distance: float = 0.45     # 가까운 쪽 우선
@@ -422,6 +440,18 @@ def cluster_candidates(window: np.ndarray, theta_deg: float,
                 "width_m": 2.0 * distance * math.sin(math.radians(max(az_span, 0.0)) / 2.0),
                 "height_span_m": float(c_z.max() - c_z.min()),
             })
+    # 가까운 거리에서 너무 가는 물체는 후보에서 뺀다 (위 min_object_width_m 설명 참고).
+    # ⚠️ 단, **전부 지워지면 되돌린다.** 이 필터의 목적은 가는 기둥 대신 그 뒤의 차량을
+    #    고르게 하는 것이지 "그 방향에 아무것도 없다"고 말하게 하는 것이 아니다. 후보가
+    #    0개가 되면 match_distance는 None을 돌려주고 화면은 "위치 미확정"이 된다 —
+    #    사각지대 반경 안에서 그러면 오토바이 근접 경고(우선순위 1위)가 조용히 사라진다.
+    #    폭이 의심스러운 물체라도 있다고 말하는 쪽이 낫다 (2026-10-29).
+    if cfg.min_object_width_m > 0 and out:
+        kept = [c for c in out
+                if c["distance_m"] > cfg.width_filter_max_range_m
+                or c["width_m"] >= cfg.min_object_width_m]
+        if kept:
+            out = kept
     out.sort(key=lambda c: c["distance_m"])
     return out
 
@@ -827,6 +857,46 @@ def run_candidate_test() -> bool:
     good = got is not None and not got["blind"] and abs(got["distance_m"] - 26.0) < 2.0
     ok &= good
     print(f"  {'가드레일보다 방향 맞는 차량':30s} expected=26m  got={_fmt(got)}  [{_pf(good)}]")
+
+    # 가는 기둥(폭 7cm)이 앞을 가려도 그 뒤의 차량을 잡아야 한다.
+    # (2026-10-16 실내 촬영에서 라이다 0.53m 앞 책상 다리가 계속 선택되던 상황)
+    # ⚠️ min_object_width_m은 기본값이 0(끔)이다 — 실내 설정에서만 켜는 값이라 이 테스트도
+    #    cfg로 명시해 켠다. 기본값으로 켜두면 근거리 물체가 통째로 지워진다(아래 회귀 참고).
+    narrow_cfg = LidarConfig(min_object_width_m=0.25)
+    pole = []
+    for az in np.arange(-0.4, 0.4, 0.1):          # 2m 거리에서 폭 7cm = 약 2°
+        for z in np.arange(-0.4, 0.4, 0.05):
+            pole.append([2.0 * np.cos(np.radians(az)), 2.0 * np.sin(np.radians(az)), z,
+                         2.0, float(az)])
+    scene_pole = np.concatenate([np.array(pole, dtype=np.float32),
+                                 np.array(_vehicle_points(9.0, 0.0, 1.7), dtype=np.float32)])
+    got = match_distance(scene_pole, 0.0, sigma_deg=6.0, mount_height_m=1.7,
+                         blind_radius_m=0.5, cfg=narrow_cfg)
+    good = got is not None and not got["blind"] and abs(got["distance_m"] - 9.0) < 1.0
+    ok &= good
+    print(f"  {'가는 기둥을 건너뛰고 차량을 잡음':30s} expected=9m  got={_fmt(got)}  [{_pf(good)}]")
+
+    # 단, 그 필터가 먼 거리의 진짜 차량까지 지우면 안 된다
+    far = match_distance(np.array(_vehicle_points(45.0, 0.0, 1.7), dtype=np.float32),
+                         0.0, sigma_deg=6.0, mount_height_m=1.7, cfg=narrow_cfg)
+    good = far is not None and abs(far["distance_m"] - 45.0) < 1.5
+    ok &= good
+    print(f"  {'먼 차량(45m)은 그대로 통과':30s} got={_fmt(far)}  [{_pf(good)}]")
+
+    # 폭 필터가 켜져 있어도 **후보를 전부 지워서는 안 된다.** 가는 물체 하나만 있는 장면에서
+    # None을 돌려주면 화면은 "위치 미확정"이 되고, 그게 사각지대 안이면 오토바이 근접
+    # 경고(우선순위 1위)가 조용히 사라진다 (2026-10-29 회귀. 실제로 이 상태였다)
+    thin_only = _make_fake_points(90.0, 3.0, n=40)     # 3m에서 현 길이 약 0.16m
+    got = match_distance(thin_only, 90.0, cfg=narrow_cfg)
+    good = got is not None and got["blind"]
+    ok &= good
+    print(f"  {'가는 물체만 있으면 안 지운다':30s} expected=blind  got={_fmt(got)}  [{_pf(good)}]")
+
+    # 그리고 주행 기본값에서는 애초에 꺼져 있어야 한다 — 실내 촬영용 값이 기본값으로
+    # 새어 들어오면 근거리 전체가 영향을 받는다
+    good = LidarConfig().min_object_width_m == 0.0
+    ok &= good
+    print(f"  {'주행 기본 설정은 폭 필터 OFF':30s} got={LidarConfig().min_object_width_m:g}  [{_pf(good)}]")
 
     # 좁은 창(카메라 지목)이 **실제로** 기여하는가 — 대조군 없이는 "어차피 맞았을 일"을
     # 검증했다고 착각하기 쉽다. 같은 장면에서 두 경로를 200번씩 돌려 비교한다.
